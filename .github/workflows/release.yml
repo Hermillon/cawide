@@ -109,7 +109,7 @@ jobs:
           TAR_ARCHIVE="dist/cawide-${{ matrix.target }}.tar.gz"
           ZIP_ARCHIVE="dist/cawide-${{ matrix.target }}.zip"
           tar -czf "$TAR_ARCHIVE" -C "$(dirname "$BIN")" cawide.exe
-          cd "$(dirname "$BIN")" && zip -r "../../../$ZIP_ARCHIVE" cawide.exe && cd ../../..
+          powershell -Command "Compress-Archive -Path 'target/${{ matrix.target }}/release/cawide.exe' -DestinationPath '$ZIP_ARCHIVE' -Force"
           cd dist
           sha256sum "cawide-${{ matrix.target }}.tar.gz" > "cawide-${{ matrix.target }}.tar.gz.sha256"
           sha256sum "cawide-${{ matrix.target }}.zip" > "cawide-${{ matrix.target }}.zip.sha256"
