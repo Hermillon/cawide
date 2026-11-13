@@ -1,0 +1,7 @@
+/target
+*.tgz
+packages/cawide/platforms/*/bin/
+packages/cawide/LICENSE
+packages/cawide/platforms/*/LICENSE
+.DS_Store
+node_modules/

@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --all --check
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.7.7
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.49.18
+        with:
+          tool: cargo-nextest
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run nextest suite
+        run: cargo nextest run --workspace --profile ci --locked
+
+      - name: Run doctests (Linux only)
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test --doc --workspace --locked
+
+  deny:
+    name: Cargo Deny Check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.49.18
+        with:
+          tool: cargo-deny
+
+      - name: Check bans, licenses, sources
+        run: cargo deny check bans licenses sources
+
+  advisories:
+    name: Cargo Security Advisories
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.49.18
+        with:
+          tool: cargo-deny
+
+      - name: Check security advisories
+        run: cargo deny check advisories
+
+  npm-wrapper:
+    name: npm Wrapper
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.7.7
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Validate cawide.js syntax
+        run: node --check packages/cawide/bin/cawide.js
+
+      - name: Build local binary and verify wrapper
+        run: |
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[]|select(.name=="cawide-host").version')
+          cargo build -p cawide-host --locked
+          node scripts/package-npm.js --local
+          NODE_PATH=packages/cawide/platforms node packages/cawide/bin/cawide.js --version | grep -F "$V"
+
+  dco:
+    name: DCO Sign-off Check
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Check commits for DCO sign-off
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          COMMITS=$(git rev-list "origin/${{ github.base_ref }}..HEAD")
+          for commit in $COMMITS; do
+            AUTHOR_EMAIL=$(git log -1 --format='%ae' "$commit")
+            TRAILERS=$(git log -1 --format='%(trailers:key=Signed-off-by,valueonly=true)' "$commit")
+            if ! echo "$TRAILERS" | grep -Fqi "<$AUTHOR_EMAIL>"; then
+              echo "Error: commit $commit by <$AUTHOR_EMAIL> lacks Signed-off-by trailer for author."
+              echo "Trailers found:"
+              echo "$TRAILERS"
+              exit 1
+            fi
+          done
+          echo "All PR commits have valid DCO sign-offs."
+
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-24.04
+    needs: [fmt, test, deny, npm-wrapper, dco]
+    if: always()
+    steps:
+      - name: Verify all required jobs passed
+        run: |
+          failure=0
+          for result in \
+            "${{ needs.fmt.result }}" \
+            "${{ needs.test.result }}" \
+            "${{ needs.deny.result }}" \
+            "${{ needs.npm-wrapper.result }}"; do
+            if [ "$result" != "success" ]; then
+              echo "Required job failed with status: $result"
+              failure=1
+            fi
+          done
+
+          dco_result="${{ needs.dco.result }}"
+          if [ "$dco_result" != "success" ] && [ "$dco_result" != "skipped" ]; then
+            echo "DCO check failed with status: $dco_result"
+            failure=1
+          fi
+
+          if [ "$failure" -eq 1 ]; then
+            echo "CI Gate failed."
+            exit 1
+          fi
+
+          echo "CI Gate passed successfully."

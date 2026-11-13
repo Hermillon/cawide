@@ -1,0 +1,79 @@
+[package]
+name = "cawide-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Cawide host daemon: run coding agents on your computer and drive them from your phone"
+
+[[bin]]
+name = "cawide"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+portable-pty = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+fs4 = { workspace = true }
+cawide-protocol = { path = "../cawide-protocol" }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+qrcode = { workspace = true }
+subtle = { workspace = true }
+hex = { workspace = true }
+iroh = { workspace = true }
+noq-proto = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }
+ignore = { workspace = true }
+nucleo-matcher = { workspace = true }
+opener = { workspace = true }
+url = { workspace = true }
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+toml_edit = { workspace = true }
+serde_json = { workspace = true }
+whoami = { workspace = true }
+vt100 = { workspace = true }
+listeners = { workspace = true }
+regex = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+mdns-sd = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Console",
+    "Win32_System_Memory",
+    "Win32_UI_Shell",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+] }
+
+[dev-dependencies]
+proptest = { workspace = true }

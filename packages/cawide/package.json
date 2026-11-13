@@ -1,0 +1,55 @@
+{
+  "name": "cawide",
+  "version": "0.13.0",
+  "description": "Run your terminal and AI coding agents on your computer, drive them from your iPhone.",
+  "homepage": "https://cawide.dev",
+  "license": "Apache-2.0",
+  "author": "Đỗ Đăng Long",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hermillon/cawide.git",
+    "directory": "packages/cawide"
+  },
+  "bugs": {
+    "url": "https://github.com/Hermillon/cawide/issues"
+  },
+  "keywords": [
+    "cawide",
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "coding-agent",
+    "terminal",
+    "remote",
+    "iphone",
+    "quic",
+    "p2p"
+  ],
+  "bin": {
+    "cawide": "bin/cawide.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "optionalDependencies": {
+    "cawide-darwin-arm64": "0.13.0",
+    "cawide-darwin-x64": "0.13.0",
+    "cawide-linux-x64": "0.13.0",
+    "cawide-linux-arm64": "0.13.0",
+    "cawide-win32-x64": "0.13.0"
+  }
+}

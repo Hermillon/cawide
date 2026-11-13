@@ -1,0 +1,22 @@
+{
+  "name": "cawide-darwin-x64",
+  "version": "0.13.0",
+  "description": "Prebuilt cawide binary for darwin/x64 (x86_64-apple-darwin)",
+  "homepage": "https://cawide.dev",
+  "license": "Apache-2.0",
+  "author": "Đỗ Đăng Long",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hermillon/cawide.git",
+    "directory": "packages/cawide/platforms/cawide-darwin-x64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/cawide"
+  ]
+}

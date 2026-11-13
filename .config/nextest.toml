@@ -1,0 +1,22 @@
+[store]
+dir = "target/nextest"
+
+[test-groups.pty-heavy]
+max-threads = 1
+
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4 }
+leak-timeout = "500ms"
+
+[[profile.default.overrides]]
+filter = 'package(cawide-host) & (binary(session_device_tests) | binary(session_output_tests) | binary(session_probe_tests) | binary(pty_integration) | binary(pty_session_tests) | binary(watch_tests) | binary(pty_chunked_tests))'
+test-group = 'pty-heavy'
+
+[profile.ci]
+fail-fast = false
+retries = 2
+slow-timeout = { period = "60s", terminate-after = 4 }
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -1,0 +1,42 @@
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    "RUSTSEC-2023-0089", # atomic-polyfill unmaintained; transitive via postcard/heapless
+    "RUSTSEC-2024-0436", # paste unmaintained; transitive via netlink-packet-core
+    "RUSTSEC-2017-0008", # serial unmaintained; transitive via portable-pty
+    "RUSTSEC-2026-0441", # pin-utils unmaintained; transitive via portable-pty/nix
+    "RUSTSEC-2026-0459", # libsqlite3-sys C SQLite CVE-2026-119375; transitive via rusqlite
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Zlib",
+    "Unlicense",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

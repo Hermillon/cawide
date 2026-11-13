@@ -1,0 +1,22 @@
+{
+  "name": "cawide-linux-arm64",
+  "version": "0.13.0",
+  "description": "Prebuilt cawide binary for linux/arm64 (aarch64-unknown-linux-gnu)",
+  "homepage": "https://cawide.dev",
+  "license": "Apache-2.0",
+  "author": "Đỗ Đăng Long",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hermillon/cawide.git",
+    "directory": "packages/cawide/platforms/cawide-linux-arm64"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/cawide"
+  ]
+}

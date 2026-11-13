@@ -1,0 +1,22 @@
+{
+  "name": "cawide-linux-x64",
+  "version": "0.13.0",
+  "description": "Prebuilt cawide binary for linux/x64 (x86_64-unknown-linux-gnu)",
+  "homepage": "https://cawide.dev",
+  "license": "Apache-2.0",
+  "author": "Đỗ Đăng Long",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hermillon/cawide.git",
+    "directory": "packages/cawide/platforms/cawide-linux-x64"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/cawide"
+  ]
+}

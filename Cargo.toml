@@ -1,0 +1,90 @@
+[workspace]
+members = [
+    "crates/cawide-host",
+    "crates/cawide-protocol",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.13.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Hermillon/cawide"
+homepage = "https://cawide.dev"
+authors = ["Đỗ Đăng Long <327922052+longd2k3@users.noreply.github.com>"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+portable-pty = "0.8"
+parking_lot = "0.12"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.0", features = ["alloc"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["fast", "std", "rand_core"] }
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng", "getrandom"] }
+qrcode = { version = "0.14", default-features = false }
+subtle = { version = "2.6", default-features = false }
+hex = "0.4"
+iroh = { version = "1.3.0" }
+noq-proto = "1.3.0"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+ignore = "0.4.23"
+nucleo-matcher = "0.3.1"
+opener = "0.8"
+url = "2.5"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "form"] }
+notify = "8.2"
+notify-debouncer-full = "0.7"
+toml_edit = "0.25"
+serde_json = { version = "1", features = ["preserve_order"] }
+proptest = "1.12"
+criterion = "0.8"
+whoami = "2.1"
+vt100 = "0.18.1"
+listeners = "0.6"
+regex = "1"
+tar = "0.4"
+flate2 = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+sha1 = "0.10"
+fs4 = { version = "0.12", default-features = false, features = ["sync"] }
+zstd = { version = "0.14", default-features = false }
+mdns-sd = "0.21"
+tempfile = "3"
+
+[profile.dev]
+opt-level = 0
+debug = 1
+split-debuginfo = "unpacked"
+
+[profile.dev.package.vt100]
+opt-level = 3
+
+[profile.dev.package.vte]
+opt-level = 3
+
+[profile.dev.package.unicode-width]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+debug = 0
