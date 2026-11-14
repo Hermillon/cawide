@@ -12,6 +12,10 @@ leak-timeout = "500ms"
 filter = 'package(cawide-host) & (binary(session_device_tests) | binary(session_output_tests) | binary(session_probe_tests) | binary(pty_integration) | binary(pty_session_tests) | binary(watch_tests) | binary(pty_chunked_tests))'
 test-group = 'pty-heavy'
 
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "windows")'
+default-filter = 'package(cawide-protocol) | (package(cawide-host) & not (kind(test) | test(test_daemon_paths) | test(test_import_gh_accounts_parses_login_field) | test(test_proc_cwd_self)))'
+
 [profile.ci]
 fail-fast = false
 retries = 2
