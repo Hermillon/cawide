@@ -349,11 +349,55 @@ pub fn ensure_shell_integration(config_dir: &Path) -> anyhow::Result<PathBuf> {
     let zsh_dir = config_dir.join("shell").join("zsh");
     std::fs::create_dir_all(&zsh_dir)?;
 
-    let zshenv = r#"[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshenv" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshenv"
+    let zshenv = r#"_cawide_zd="$ZDOTDIR"
+if [ -n "$CAWIDE_ORIG_ZDOTDIR" ]; then
+    export ZDOTDIR="$CAWIDE_ORIG_ZDOTDIR"
+else
+    unset ZDOTDIR
+fi
+[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshenv" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshenv"
+if [ -n "$ZDOTDIR" ]; then
+    export CAWIDE_ORIG_ZDOTDIR="$ZDOTDIR"
+else
+    unset CAWIDE_ORIG_ZDOTDIR
+fi
+if [[ -o interactive || -o login ]] 2>/dev/null; then
+    export ZDOTDIR="$_cawide_zd"
+else
+    unset CAWIDE_ORIG_ZDOTDIR
+fi
+unset _cawide_zd
 "#;
-    let zprofile = r#"[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zprofile" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zprofile"
+    let zprofile = r#"_cawide_zd="$ZDOTDIR"
+if [ -n "$CAWIDE_ORIG_ZDOTDIR" ]; then
+    export ZDOTDIR="$CAWIDE_ORIG_ZDOTDIR"
+else
+    unset ZDOTDIR
+fi
+[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zprofile" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zprofile"
+if [ -n "$ZDOTDIR" ]; then
+    export CAWIDE_ORIG_ZDOTDIR="$ZDOTDIR"
+else
+    unset CAWIDE_ORIG_ZDOTDIR
+fi
+export ZDOTDIR="$_cawide_zd"
+unset _cawide_zd
 "#;
-    let zshrc = r#"[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshrc" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshrc"
+    let zshrc = r#"_cawide_zd="$ZDOTDIR"
+if [ "$HISTFILE" = "$_cawide_zd/.zsh_history" ]; then
+    HISTFILE="${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zsh_history"
+fi
+if [ -n "$CAWIDE_ORIG_ZDOTDIR" ]; then
+    export ZDOTDIR="$CAWIDE_ORIG_ZDOTDIR"
+else
+    unset ZDOTDIR
+fi
+[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshrc" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zshrc"
+if [ -n "$ZDOTDIR" ]; then
+    export CAWIDE_ORIG_ZDOTDIR="$ZDOTDIR"
+else
+    unset CAWIDE_ORIG_ZDOTDIR
+fi
 
 if ! [[ -o login ]] 2>/dev/null; then
     if [ -n "$CAWIDE_BIN_DIR" ]; then
@@ -365,9 +409,24 @@ if ! [[ -o login ]] 2>/dev/null; then
     else
         unset ZDOTDIR
     fi
+    unset CAWIDE_ORIG_ZDOTDIR
+else
+    export ZDOTDIR="$_cawide_zd"
 fi
+unset _cawide_zd
 "#;
-    let zlogin = r#"[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zlogin" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zlogin"
+    let zlogin = r#"_cawide_zd="$ZDOTDIR"
+if [ -n "$CAWIDE_ORIG_ZDOTDIR" ]; then
+    export ZDOTDIR="$CAWIDE_ORIG_ZDOTDIR"
+else
+    unset ZDOTDIR
+fi
+[ -f "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zlogin" ] && . "${CAWIDE_ORIG_ZDOTDIR:-$HOME}/.zlogin"
+if [ -n "$ZDOTDIR" ]; then
+    export CAWIDE_ORIG_ZDOTDIR="$ZDOTDIR"
+else
+    unset CAWIDE_ORIG_ZDOTDIR
+fi
 
 if [ -n "$CAWIDE_BIN_DIR" ]; then
     PATH="$CAWIDE_BIN_DIR:$PATH"
@@ -378,6 +437,7 @@ if [ -n "$CAWIDE_ORIG_ZDOTDIR" ]; then
 else
     unset ZDOTDIR
 fi
+unset CAWIDE_ORIG_ZDOTDIR _cawide_zd
 "#;
 
     std::fs::write(zsh_dir.join(".zshenv"), zshenv)?;
