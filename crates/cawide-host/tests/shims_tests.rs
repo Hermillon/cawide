@@ -421,3 +421,128 @@ async fn test_pty_env_shims_injection() {
 
     let _ = session.send_input(b"exit\n");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_zsh_shell_integration_preserves_user_zdotdir() {
+    let which_zsh = std::process::Command::new("which").arg("zsh").output();
+    if !which_zsh
+        .as_ref()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path().join("cawide_config");
+    let user_home = tmp.path().join("user_home");
+    std::fs::create_dir_all(&user_home).expect("create user home");
+
+    let zsh_dir = cawide_host::net::shims::ensure_shell_integration(&config_dir)
+        .expect("ensure_shell_integration");
+
+    std::fs::write(user_home.join(".zsh_plugins.txt"), "dummy_plugin").expect("write plugin");
+
+    let user_zshrc = r#"
+echo "RC_ZDOTDIR:${ZDOTDIR:-<unset>}"
+bundlefile=${ZDOTDIR:-$HOME}/.zsh_plugins.txt
+if [[ -f "$bundlefile" ]]; then
+    echo "RC_BUNDLE:FOUND"
+else
+    echo "RC_BUNDLE:NOT_FOUND:$bundlefile"
+fi
+"#;
+    std::fs::write(user_home.join(".zshrc"), user_zshrc).expect("write user zshrc");
+
+    // 1. Interactive non-login
+    let output = std::process::Command::new("zsh")
+        .args([
+            "-i",
+            "-c",
+            "echo SHELL_ZDOTDIR:${ZDOTDIR:-<unset>}; echo SHELL_PATH:${PATH%%:*}",
+        ])
+        .env("HOME", &user_home)
+        .env("ZDOTDIR", &zsh_dir)
+        .env("CAWIDE_BIN_DIR", "/dummy/bin")
+        .env_remove("CAWIDE_ORIG_ZDOTDIR")
+        .output()
+        .expect("failed to execute zsh");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+
+    assert!(
+        combined.contains("RC_ZDOTDIR:<unset>"),
+        "User .zshrc must see ZDOTDIR as unset (or original), got:\n{combined}"
+    );
+    assert!(
+        combined.contains("RC_BUNDLE:FOUND"),
+        "User .zshrc must find bundle file in HOME, got:\n{combined}"
+    );
+    assert!(
+        combined.contains("SHELL_ZDOTDIR:<unset>"),
+        "Interactive shell must have ZDOTDIR restored, got:\n{combined}"
+    );
+    assert!(
+        combined.contains("SHELL_PATH:/dummy/bin"),
+        "CAWIDE_BIN_DIR must be at front of PATH, got:\n{combined}"
+    );
+
+    // 2. Interactive login shell
+    let login_output = std::process::Command::new("zsh")
+        .args([
+            "-i",
+            "-l",
+            "-c",
+            "echo SHELL_LOGIN_ZDOTDIR:${ZDOTDIR:-<unset>}",
+        ])
+        .env("HOME", &user_home)
+        .env("ZDOTDIR", &zsh_dir)
+        .env("CAWIDE_BIN_DIR", "/dummy/bin")
+        .env_remove("CAWIDE_ORIG_ZDOTDIR")
+        .output()
+        .expect("failed to execute login zsh");
+    let login_combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&login_output.stdout),
+        String::from_utf8_lossy(&login_output.stderr)
+    );
+    assert!(
+        login_combined.contains("SHELL_LOGIN_ZDOTDIR:<unset>"),
+        "Login interactive shell must have ZDOTDIR restored, got:\n{login_combined}"
+    );
+
+    // 3. Custom original ZDOTDIR
+    let custom_zdotdir = tmp.path().join("custom_zdotdir");
+    std::fs::create_dir_all(&custom_zdotdir).expect("create custom zdotdir");
+    std::fs::write(
+        custom_zdotdir.join(".zshrc"),
+        "echo CUSTOM_RC_ZDOTDIR:${ZDOTDIR:-<unset>}",
+    )
+    .expect("write custom zshrc");
+
+    let custom_output = std::process::Command::new("zsh")
+        .args(["-i", "-c", "echo CUSTOM_SHELL_ZDOTDIR:${ZDOTDIR:-<unset>}"])
+        .env("HOME", &user_home)
+        .env("ZDOTDIR", &zsh_dir)
+        .env("CAWIDE_ORIG_ZDOTDIR", &custom_zdotdir)
+        .env("CAWIDE_BIN_DIR", "/dummy/bin")
+        .output()
+        .expect("failed to execute zsh with custom zdotdir");
+    let custom_combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&custom_output.stdout),
+        String::from_utf8_lossy(&custom_output.stderr)
+    );
+    let expected_custom = custom_zdotdir.display().to_string();
+    assert!(
+        custom_combined.contains(&format!("CUSTOM_RC_ZDOTDIR:{expected_custom}")),
+        "Custom ZDOTDIR must be preserved in .zshrc, got:\n{custom_combined}"
+    );
+    assert!(
+        custom_combined.contains(&format!("CUSTOM_SHELL_ZDOTDIR:{expected_custom}")),
+        "Custom ZDOTDIR must be preserved in shell, got:\n{custom_combined}"
+    );
+}
