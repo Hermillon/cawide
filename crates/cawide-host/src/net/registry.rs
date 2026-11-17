@@ -678,16 +678,6 @@ impl SessionRegistry {
 
         None
     }
-    pub fn get_session_context(
-        &self,
-        session_id: &str,
-    ) -> Option<(Arc<PtySession>, PathBuf, Option<String>)> {
-        let sessions = self.sessions.read();
-        sessions
-            .get(session_id)
-            .map(|e| (Arc::clone(&e.session), e.cwd.clone(), e.active_cmd.clone()))
-    }
-
     pub fn root_pids(&self) -> HashMap<u32, String> {
         let mut roots = HashMap::new();
         let sessions = self.sessions.read();
