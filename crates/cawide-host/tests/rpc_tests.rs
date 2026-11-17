@@ -1272,32 +1272,18 @@ async fn git_apply_patch_stage_and_discard() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn voice_compile_prompt_fallback_and_symbols() {
+async fn voice_compile_prompt_returns_removed() {
     let mut env = Env::start().await;
-    env.write(
-        "WorkspaceView.swift",
-        b"import SwiftUI\nstruct WorkspaceView: View {}\n",
-    );
-
     let resp = env
         .call(RpcRequest::VoiceCompilePrompt {
-            session_id: "non-existent-session".into(),
-            transcript: "mở file WorkspaceView . swift rồi sửa phiên bản 2 . 5".into(),
-            active_file: Some("WorkspaceView.swift".into()),
-            language_mode: "vi".into(),
+            session_id: String::new(),
+            transcript: String::new(),
+            active_file: None,
+            language_mode: String::new(),
         })
         .await;
-
-    let RpcResponse::VoiceCompilePrompt(res) = resp else {
-        panic!("expected VoiceCompilePrompt variant");
-    };
-
-    let compile_result = res.expect("voice compilation should succeed via fallback or provider");
-    assert_eq!(
-        compile_result.clean_prompt,
-        "mở file WorkspaceView.swift rồi sửa phiên bản 2.5"
+    assert!(
+        matches!(&resp, RpcResponse::VoiceCompilePrompt(Err(e)) if e == "voice_compile_removed")
     );
-    assert_eq!(compile_result.detected_language, "vi");
-
     env.shutdown().await;
 }
