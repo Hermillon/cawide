@@ -120,7 +120,63 @@ pub async fn run_login(config_dir: &Path) -> anyhow::Result<()> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnlinkOutcome {
+    Unlinked,
+    NotLinked,
+    DaemonTooOld,
+}
+
+pub async fn unlink_this_computer(config_dir: &Path) -> anyhow::Result<UnlinkOutcome> {
+    let socket = match std::env::var_os("CAWIDE_SOCKET") {
+        Some(s) if !s.is_empty() => std::path::PathBuf::from(s),
+        _ => crate::net::default_ipc_path(config_dir),
+    };
+    unlink_at_socket(config_dir, &socket).await
+}
+
+async fn unlink_at_socket(config_dir: &Path, socket: &Path) -> anyhow::Result<UnlinkOutcome> {
+    match crate::net::send_ipc_request(socket, &crate::net::IpcRequest::AccountUnlink).await {
+        Ok(crate::net::IpcResponse::Unlinked { was_linked }) => Ok(if was_linked {
+            UnlinkOutcome::Unlinked
+        } else {
+            UnlinkOutcome::NotLinked
+        }),
+        Ok(crate::net::IpcResponse::Error(m)) => Err(anyhow::anyhow!(m)),
+        Ok(_) => Err(anyhow::anyhow!("unexpected response")),
+        Err(crate::net::NetError::DaemonNotRunning(_)) => {
+            let auth_path = config_dir.join("authorized_keys");
+            let (was_linked, _) = tokio::task::spawn_blocking(move || {
+                let store = crate::auth::AuthorizedKeysStore::open_or_create(auth_path)?;
+                store.mark_unlinked_local(true)
+            })
+            .await
+            .context("unlink task failed")??;
+            Ok(if was_linked {
+                UnlinkOutcome::Unlinked
+            } else {
+                UnlinkOutcome::NotLinked
+            })
+        }
+        Err(crate::net::NetError::UnexpectedIpcResponse(_)) => Ok(UnlinkOutcome::DaemonTooOld),
+        Err(e) => Err(e.into()),
+    }
+}
+
 pub async fn run_logout(config_dir: &Path) -> anyhow::Result<()> {
+    match unlink_this_computer(config_dir).await {
+        Ok(UnlinkOutcome::Unlinked) => {
+            println!("✔ Unlinked this computer from your Cawide account");
+        }
+        Ok(UnlinkOutcome::NotLinked) => {}
+        Ok(UnlinkOutcome::DaemonTooOld) => {
+            println!("daemon too old; update cawide to unlink this computer");
+        }
+        Err(e) => {
+            eprintln!("warning: could not unlink this computer: {e:#}");
+        }
+    }
+
     let existing = account::load(config_dir)?;
     let account = match existing {
         Some(a) => a,
@@ -154,4 +210,94 @@ pub async fn run_logout(config_dir: &Path) -> anyhow::Result<()> {
     account::delete(config_dir)?;
     println!("Logged out.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthorizedKeysStore;
+    use crate::net::{
+        bind_ipc_listener, default_ipc_path, IpcRequest, IpcResponse, MAX_IPC_FRAME_SIZE,
+    };
+    use cawide_account::{public_key_of, HostTrustSnapshot};
+    use cawide_protocol::{read_length_prefixed, write_length_prefixed};
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn unlink_this_computer_offline_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = default_ipc_path(tmp.path());
+        assert_eq!(
+            unlink_at_socket(tmp.path(), &sock).await.unwrap(),
+            UnlinkOutcome::NotLinked
+        );
+
+        let store =
+            AuthorizedKeysStore::open_or_create(tmp.path().join("authorized_keys")).unwrap();
+        let pk = public_key_of(&[1u8; 32]);
+        store.add_key(pk, "Phone".into()).unwrap();
+        store.begin_claim(&pk, "acct-1", false, 100).unwrap();
+        store
+            .apply_account_sync(
+                &HostTrustSnapshot {
+                    version: 1,
+                    account_id: "acct-1".into(),
+                    locked: false,
+                    devices: vec![],
+                    links: vec![],
+                    revoked: vec![],
+                },
+                100,
+            )
+            .unwrap();
+        drop(store);
+
+        assert_eq!(
+            unlink_at_socket(tmp.path(), &sock).await.unwrap(),
+            UnlinkOutcome::Unlinked
+        );
+        let reopened =
+            AuthorizedKeysStore::open_or_create(tmp.path().join("authorized_keys")).unwrap();
+        assert!(reopened.account_link().is_none());
+        assert!(reopened.pending_unlink());
+    }
+
+    #[tokio::test]
+    async fn unlink_this_computer_ipc_and_old_daemon() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = default_ipc_path(tmp.path());
+        let mut listener = bind_ipc_listener(&sock).unwrap();
+
+        let srv = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let req: Option<IpcRequest> = read_length_prefixed(&mut stream, MAX_IPC_FRAME_SIZE)
+                .await
+                .unwrap();
+            assert_eq!(req, Some(IpcRequest::AccountUnlink));
+            write_length_prefixed(
+                &mut stream,
+                &IpcResponse::Unlinked { was_linked: true },
+                MAX_IPC_FRAME_SIZE,
+            )
+            .await
+            .unwrap();
+            drop(stream);
+
+            // Second connection simulates an old daemon closing on unknown variant.
+            let mut stream2 = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let _ = stream2.read(&mut buf).await;
+            drop(stream2);
+        });
+
+        assert_eq!(
+            unlink_at_socket(tmp.path(), &sock).await.unwrap(),
+            UnlinkOutcome::Unlinked
+        );
+        assert_eq!(
+            unlink_at_socket(tmp.path(), &sock).await.unwrap(),
+            UnlinkOutcome::DaemonTooOld
+        );
+        srv.await.unwrap();
+    }
 }

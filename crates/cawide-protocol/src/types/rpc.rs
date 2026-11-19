@@ -94,6 +94,11 @@ pub enum RpcRequest {
     SetPushChannel {
         channel: Option<PushChannel>,
     },
+    /// Claim this host into a Cawide account; the host signs a claim proof.
+    AccountClaim {
+        account_id: String,
+        takeover: bool,
+    },
 }
 
 /// Remote procedure call responses returned on stream 0x03.
@@ -122,6 +127,8 @@ pub enum RpcResponse {
     PortList(Result<Vec<ListeningPort>, String>),
     VoiceCompilePrompt(Result<VoiceCompileResult, String>),
     SetPushChannel(Result<(), String>),
+    /// `postcard(cawide_account::HostClaimProof)` on success.
+    AccountClaim(Result<Vec<u8>, String>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

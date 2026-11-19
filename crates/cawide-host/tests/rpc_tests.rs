@@ -1287,3 +1287,275 @@ async fn voice_compile_prompt_returns_removed() {
     );
     env.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_claim_paired_client_and_second_account_rejection() {
+    let mut env = Env::start().await;
+    let resp = env
+        .call(RpcRequest::AccountClaim {
+            account_id: "acct-1".into(),
+            takeover: false,
+        })
+        .await;
+    let RpcResponse::AccountClaim(Ok(bytes)) = resp else {
+        panic!("expected AccountClaim Ok, got {resp:?}");
+    };
+    let proof = cawide_account::HostClaimProof::from_bytes(&bytes).unwrap();
+    proof.verify().unwrap();
+    assert_eq!(proof.body.host, env.server.node_id());
+    assert_eq!(proof.body.account_id, "acct-1");
+    assert_eq!(proof.body.claimer, *env._ep.id().as_bytes());
+
+    let resp2 = env
+        .call(RpcRequest::AccountClaim {
+            account_id: "acct-2".into(),
+            takeover: false,
+        })
+        .await;
+    assert!(
+        matches!(&resp2, RpcResponse::AccountClaim(Err(e)) if e == "linked to another account"),
+        "expected linked to another account, got {resp2:?}"
+    );
+
+    env.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn account_claim_account_sourced_client_and_takeover_rejection() {
+    let mut env = Env::start().await;
+    let paired_secret = env._ep.secret_key().to_bytes();
+    let paired_pk = *env._ep.id().as_bytes();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    assert!(env
+        .server
+        .auth_store()
+        .begin_claim(&paired_pk, "acct-1", false, now)
+        .unwrap());
+
+    let k2_secret_key = iroh::SecretKey::generate();
+    let k2_secret = k2_secret_key.to_bytes();
+    let k2_pk = *k2_secret_key.public().as_bytes();
+
+    let link_body =
+        cawide_account::DeviceLinkBody::new("acct-1".into(), paired_pk, k2_pk, "iPad".into(), now);
+    let msg = link_body.signing_message();
+    let link = cawide_account::DeviceLink {
+        body: link_body,
+        issuer_sig: cawide_account::sign(&paired_secret, &msg).to_vec(),
+        subject_sig: cawide_account::sign(&k2_secret, &msg).to_vec(),
+    };
+    link.verify().unwrap();
+
+    let snap = cawide_account::HostTrustSnapshot {
+        version: 1,
+        account_id: "acct-1".into(),
+        locked: false,
+        devices: vec![cawide_account::SnapshotDevice {
+            public_key: hex::encode(k2_pk),
+            name: "iPad".into(),
+        }],
+        links: vec![hex::encode(link.to_bytes())],
+        revoked: vec![],
+    };
+    env.server
+        .auth_store()
+        .apply_account_sync(&snap, now)
+        .unwrap();
+
+    let ep2 = common::client(k2_secret_key).await;
+    let conn2 = common::connect(&ep2, &env.server, cawide_protocol::ALPN_CAWIDE)
+        .await
+        .expect("account-sourced client should connect");
+    let (mut send2, mut recv2) = open(&conn2, StreamPurpose::Rpc).await;
+
+    common::within(cawide_protocol::write_rpc_request(
+        &mut send2,
+        1,
+        &RpcRequest::AccountClaim {
+            account_id: "acct-1".into(),
+            takeover: false,
+        },
+    ))
+    .await
+    .unwrap();
+    let frame1 = common::within(cawide_protocol::read_rpc_response(&mut recv2))
+        .await
+        .unwrap()
+        .expect("rpc response");
+    let RpcResponse::AccountClaim(Ok(bytes)) = frame1.payload else {
+        panic!(
+            "expected AccountClaim Ok for acct-1, got {:?}",
+            frame1.payload
+        );
+    };
+    let proof = cawide_account::HostClaimProof::from_bytes(&bytes).unwrap();
+    proof.verify().unwrap();
+    assert_eq!(proof.body.host, env.server.node_id());
+    assert_eq!(proof.body.claimer, k2_pk);
+
+    common::within(cawide_protocol::write_rpc_request(
+        &mut send2,
+        2,
+        &RpcRequest::AccountClaim {
+            account_id: "acct-2".into(),
+            takeover: false,
+        },
+    ))
+    .await
+    .unwrap();
+    let frame2 = common::within(cawide_protocol::read_rpc_response(&mut recv2))
+        .await
+        .unwrap()
+        .expect("rpc response");
+    assert!(
+        matches!(&frame2.payload, RpcResponse::AccountClaim(Err(e)) if e == "linked to another account"),
+        "expected linked to another account, got {:?}",
+        frame2.payload
+    );
+
+    let paired_resp = env
+        .call(RpcRequest::AccountClaim {
+            account_id: "acct-2".into(),
+            takeover: false,
+        })
+        .await;
+    assert!(
+        matches!(&paired_resp, RpcResponse::AccountClaim(Err(e)) if e == "linked to another account"),
+        "expected linked to another account from paired client, got {paired_resp:?}"
+    );
+
+    drop(send2);
+    drop(recv2);
+    conn2.close(0u32.into(), b"done");
+    ep2.close().await;
+    env.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ipc_account_status_devices_with_source_and_unlink() {
+    use cawide_host::net::{send_ipc_request, IpcRequest, IpcResponse};
+
+    let mut env = Env::start().await;
+    let sock = env.server.socket_path().to_path_buf();
+
+    let status0 = common::within(send_ipc_request(&sock, &IpcRequest::AccountStatus))
+        .await
+        .unwrap();
+    assert_eq!(
+        status0,
+        IpcResponse::AccountStatus {
+            account_id: None,
+            claims_disabled: false,
+        }
+    );
+
+    let resp = env
+        .call(RpcRequest::AccountClaim {
+            account_id: "acct-1".into(),
+            takeover: false,
+        })
+        .await;
+    assert!(matches!(resp, RpcResponse::AccountClaim(Ok(_))));
+
+    let paired_secret = env._ep.secret_key().to_bytes();
+    let paired_pk = *env._ep.id().as_bytes();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let k2_secret_key = iroh::SecretKey::generate();
+    let k2_secret = k2_secret_key.to_bytes();
+    let k2_pk = *k2_secret_key.public().as_bytes();
+    let link_body =
+        cawide_account::DeviceLinkBody::new("acct-1".into(), paired_pk, k2_pk, "iPad".into(), now);
+    let msg = link_body.signing_message();
+    let link = cawide_account::DeviceLink {
+        body: link_body,
+        issuer_sig: cawide_account::sign(&paired_secret, &msg).to_vec(),
+        subject_sig: cawide_account::sign(&k2_secret, &msg).to_vec(),
+    };
+    let snap = cawide_account::HostTrustSnapshot {
+        version: 1,
+        account_id: "acct-1".into(),
+        locked: false,
+        devices: vec![cawide_account::SnapshotDevice {
+            public_key: hex::encode(k2_pk),
+            name: "iPad".into(),
+        }],
+        links: vec![hex::encode(link.to_bytes())],
+        revoked: vec![],
+    };
+    env.server
+        .auth_store()
+        .apply_account_sync(&snap, now)
+        .unwrap();
+
+    let ep2 = common::client(k2_secret_key).await;
+    let conn2 = common::connect(&ep2, &env.server, cawide_protocol::ALPN_CAWIDE)
+        .await
+        .unwrap();
+
+    let status1 = common::within(send_ipc_request(&sock, &IpcRequest::AccountStatus))
+        .await
+        .unwrap();
+    assert_eq!(
+        status1,
+        IpcResponse::AccountStatus {
+            account_id: Some("acct-1".into()),
+            claims_disabled: false,
+        }
+    );
+
+    let devs = common::within(send_ipc_request(&sock, &IpcRequest::ListDevicesWithSource))
+        .await
+        .unwrap();
+    let IpcResponse::DevicesWithSource(list) = devs else {
+        panic!("expected DevicesWithSource, got {devs:?}");
+    };
+    assert_eq!(list.len(), 2);
+    let paired_hex = hex::encode(paired_pk);
+    let k2_hex = hex::encode(k2_pk);
+    assert!(list
+        .iter()
+        .any(|d| d.node_id == paired_hex && d.source == "paired"));
+    assert!(list
+        .iter()
+        .any(|d| d.node_id == k2_hex && d.source == "account"));
+
+    let unlinked = common::within(send_ipc_request(&sock, &IpcRequest::AccountUnlink))
+        .await
+        .unwrap();
+    assert_eq!(unlinked, IpcResponse::Unlinked { was_linked: true });
+
+    let close_err = tokio::time::timeout(std::time::Duration::from_secs(2), conn2.closed())
+        .await
+        .expect("account connection should close on unlink");
+    assert!(matches!(
+        close_err,
+        iroh::endpoint::ConnectionError::ApplicationClosed(c)
+            if c.error_code == iroh::endpoint::VarInt::from_u32(cawide_protocol::CLOSE_UNAUTHORIZED)
+    ));
+
+    let status2 = common::within(send_ipc_request(&sock, &IpcRequest::AccountStatus))
+        .await
+        .unwrap();
+    assert_eq!(
+        status2,
+        IpcResponse::AccountStatus {
+            account_id: None,
+            claims_disabled: true,
+        }
+    );
+
+    let unlinked2 = common::within(send_ipc_request(&sock, &IpcRequest::AccountUnlink))
+        .await
+        .unwrap();
+    assert_eq!(unlinked2, IpcResponse::Unlinked { was_linked: false });
+
+    ep2.close().await;
+    env.shutdown().await;
+}

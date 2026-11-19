@@ -391,11 +391,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
+name = "cawide-account"
+version = "0.13.0"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "hex",
+ "postcard",
+ "rand 0.8.8",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cawide-host"
 version = "0.13.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "cawide-account",
  "cawide-protocol",
  "clap",
  "ed25519-dalek 2.2.0",

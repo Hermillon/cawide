@@ -197,6 +197,10 @@ fn test_rpc_requests_and_responses_roundtrip() {
             }),
         },
         RpcRequest::SetPushChannel { channel: None },
+        RpcRequest::AccountClaim {
+            account_id: "user-1".to_string(),
+            takeover: true,
+        },
     ];
 
     for req in requests {
@@ -377,6 +381,8 @@ fn test_rpc_requests_and_responses_roundtrip() {
         RpcResponse::PortList(Err("scan failed".into())),
         RpcResponse::SetPushChannel(Ok(())),
         RpcResponse::SetPushChannel(Err("push registration failed".into())),
+        RpcResponse::AccountClaim(Ok(vec![1, 2, 3])),
+        RpcResponse::AccountClaim(Err("linked to another account".into())),
     ];
 
     for resp in responses {

@@ -19,7 +19,10 @@ pub mod ui;
 pub mod update;
 pub mod watch;
 pub mod web;
-pub use auth::{AuthError, AuthorizedEntry, AuthorizedKeysStore, PairingManager, PairingTicket};
+pub use auth::{
+    AccountLink, AuthError, AuthorizedEntry, AuthorizedKeysStore, KeySource, PairingManager,
+    PairingTicket,
+};
 pub use pty::{
     AttachStart, PtyError, PtySession, PtySpawnOptions, SessionOutput, SliceResult, Utf8RingBuffer,
     BROADCAST_CHANNEL_CAPACITY, DEFAULT_RING_BUFFER_CAPACITY, MAX_REPLAY_BYTES,

@@ -4,9 +4,9 @@ use std::path::Path;
 
 use cawide_protocol::CLOSE_UNAUTHORIZED;
 
-use crate::auth::AuthorizedKeysStore;
+use crate::auth::{AuthorizedKeysStore, KeySource};
 use crate::net::connections::ConnectionTracker;
-use crate::net::ipc::{DeviceInfo, IpcResponse};
+use crate::net::ipc::{DeviceInfo, DeviceInfoWithSource, IpcResponse};
 
 pub fn list(store: &AuthorizedKeysStore) -> IpcResponse {
     let mut devices: Vec<DeviceInfo> = store
@@ -20,6 +20,24 @@ pub fn list(store: &AuthorizedKeysStore) -> IpcResponse {
         .collect();
     devices.sort_by(|a, b| a.node_id.cmp(&b.node_id));
     IpcResponse::Devices(devices)
+}
+
+pub fn list_with_source(store: &AuthorizedKeysStore) -> IpcResponse {
+    let mut devices: Vec<DeviceInfoWithSource> = store
+        .list_keys()
+        .into_iter()
+        .map(|entry| DeviceInfoWithSource {
+            node_id: hex::encode(entry.public_key),
+            device_name: entry.device_name,
+            added_at_ts: entry.added_at_ts,
+            source: match entry.source {
+                KeySource::Paired => "paired".to_string(),
+                KeySource::Account { .. } => "account".to_string(),
+            },
+        })
+        .collect();
+    devices.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+    IpcResponse::DevicesWithSource(devices)
 }
 
 pub fn revoke(
@@ -103,19 +121,39 @@ fn execute_revoke(
 }
 
 pub async fn cli_devices(config_dir: &Path) -> anyhow::Result<()> {
-    let socket = config_dir.join("cawide.sock");
-    let resp = match crate::net::send_ipc_request(&socket, &crate::net::IpcRequest::ListDevices)
-        .await
-    {
-        Ok(r) => r,
-        Err(crate::net::NetError::DaemonNotRunning(_)) => {
-            let store = AuthorizedKeysStore::open_or_create(config_dir.join("authorized_keys"))?;
-            list(&store)
-        }
-        Err(e) => anyhow::bail!("failed to query daemon: {e}"),
-    };
+    let socket = crate::net::default_ipc_path(config_dir);
+    let resp =
+        match crate::net::send_ipc_request(&socket, &crate::net::IpcRequest::ListDevicesWithSource)
+            .await
+        {
+            Ok(r) => r,
+            Err(crate::net::NetError::DaemonNotRunning(_)) => {
+                let store =
+                    AuthorizedKeysStore::open_or_create(config_dir.join("authorized_keys"))?;
+                list_with_source(&store)
+            }
+            Err(crate::net::NetError::UnexpectedIpcResponse(_)) => {
+                match crate::net::send_ipc_request(&socket, &crate::net::IpcRequest::ListDevices)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => anyhow::bail!("failed to query daemon: {e}"),
+                }
+            }
+            Err(e) => anyhow::bail!("failed to query daemon: {e}"),
+        };
 
     match resp {
+        IpcResponse::DevicesWithSource(devices) => {
+            if devices.is_empty() {
+                println!("No authorized devices.");
+            } else {
+                for d in devices {
+                    println!("{}  {:<7}  {}", d.node_id, d.source, d.device_name);
+                }
+            }
+            Ok(())
+        }
         IpcResponse::Devices(devices) => {
             if devices.is_empty() {
                 println!("No authorized devices.");

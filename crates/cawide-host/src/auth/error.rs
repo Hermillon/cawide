@@ -22,4 +22,6 @@ pub enum AuthError {
     PairingExpired,
     #[error("Invalid pairing secret")]
     InvalidPairingSecret,
+    #[error("Account sync error: {0}")]
+    AccountSync(String),
 }
