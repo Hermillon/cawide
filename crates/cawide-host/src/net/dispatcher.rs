@@ -986,21 +986,9 @@ async fn dispatch_rpc(
             .and_then(|r| r);
             RpcResponse::PortList(res)
         }
-        RpcRequest::VoiceCompilePrompt {
-            session_id,
-            transcript,
-            active_file,
-            language_mode,
-        } => {
-            let result = crate::rpc::voice::handle_voice_compile(
-                registry,
-                &session_id,
-                &transcript,
-                active_file.as_deref(),
-                &language_mode,
-            )
-            .await;
-            RpcResponse::VoiceCompilePrompt(result)
+        RpcRequest::VoiceCompilePrompt { .. } => {
+            // Variant kept: postcard encodes RpcRequest/RpcResponse by index; removing it would shift later variants.
+            RpcResponse::VoiceCompilePrompt(Err("voice_compile_removed".to_owned()))
         }
         RpcRequest::SetPushChannel { channel } => {
             RpcResponse::SetPushChannel(push.set_channel(client_node_id, channel).await)

@@ -146,7 +146,7 @@ jobs:
       - name: Check commits for DCO sign-off
         run: |
           git fetch origin "${{ github.base_ref }}" --depth=1
-          COMMITS=$(git rev-list "origin/${{ github.base_ref }}..HEAD")
+          COMMITS=$(git rev-list --no-merges "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}")
           for commit in $COMMITS; do
             AUTHOR_EMAIL=$(git log -1 --format='%ae' "$commit")
             TRAILERS=$(git log -1 --format='%(trailers:key=Signed-off-by,valueonly=true)' "$commit")
