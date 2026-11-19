@@ -4,7 +4,6 @@ pub mod fs;
 pub mod git;
 pub mod jail;
 pub mod process;
-pub mod voice;
 
 pub(crate) use fs::join_err;
 pub use fs::{FsEngine, OpenerHook};
