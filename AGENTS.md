@@ -10,7 +10,7 @@ This document defines the governing architectural invariants, wire protocol cont
 | **Zero Head-of-Line Blocking** | Multiplexing MUST isolate failure domains over independent RFC 9000 QUIC streams: PTY (`0x04`), Control (`0x02`), RPC (`0x03`), and Tunnel (`0x05`). A stall or backpressure on RPC or Tunnel streams MUST NOT impede PTY input/output. |
 | **Session Indestructibility** | Host child processes, shells, and agent CLI sessions MUST survive client disconnections, IP roaming, cellular handoffs, and background suspension. Sessions persist across transport resets via the ring buffer and headless PTY master. |
 | **Host Ring-Buffer & Backpressure Limits** | PTY ring buffer MUST enforce `DEFAULT_RING_BUFFER_CAPACITY = 4 MiB`, 2 MiB replay ceiling, and max 10,000 lines scrollback. QUIC stream backpressure MUST bound writes at 32 KB per 16 ms. |
-| **Zero-Trust TOFU Security** | Ephemeral pairing MUST operate over ALPN `cawide/pair/1` with a 5-minute TTL. Active sessions MUST operate over ALPN `cawide/5` with mTLS 1.3 using raw Ed25519 keys. Unrecognized node IDs MUST be rejected at `EndpointHooks::after_handshake` with close code `0x01` (`CLOSE_UNAUTHORIZED`) prior to stream acceptance. |
+| **Zero-Trust TOFU Security** | Ephemeral pairing MUST operate over ALPN `cawide/pair/1` with a 5-minute TTL. Active sessions MUST operate over ALPN `cawide/5` with mTLS 1.3 using raw Ed25519 keys. Unrecognized node IDs MUST be rejected at `EndpointHooks::after_handshake` with close code `0x01` (`CLOSE_UNAUTHORIZED`) prior to stream acceptance. Account-synced keys are admitted only through a verified mutual-signature `DeviceLink` path from a locally paired key; Cawide Cloud can revoke but never grant. |
 
 ---
 
@@ -51,7 +51,7 @@ Each QUIC bi-directional stream initiated by the client MUST begin with a 1-byte
 ## 3. Crate Responsibilities & Invariants
 
 ### 3.1 Architectural Scope
-This domain covers `crates/cawide-protocol` and `crates/cawide-host`.
+This domain covers `crates/cawide-protocol`, `crates/cawide-account`, and `crates/cawide-host`.
 
 ### 3.2 Invariants & Runtime Guidelines
 
@@ -71,6 +71,7 @@ This domain covers `crates/cawide-protocol` and `crates/cawide-host`.
 | `crates/cawide-host/src/rpc/` | RPC dispatch, workspace jail, filesystem RPCs, hardened process runner (`setsid` + process-group kill) | INV-FS-001/002/003 |
 | `crates/cawide-host/src/rpc/git/` | Git engine behind the `Git { root, op: GitOp }` envelope: hardened `git` CLI, staging, LFS detection, history graph, branches, remotes, stash, sequencer, SSH host-key policy | INV-GIT-001/002/003, INV-LFS-001, INV-SSH-001 |
 | `crates/cawide-host/src/forge/` | Forge engine behind `ForgeAccounts`/`Forge` RPCs: REST adapters (GitHub, GitLab, Gitea, Bitbucket, Azure DevOps), capability table, flock-guarded account store, `cawide git-credential` helper, SSH key/host-key trust | INV-FORGE-001/002, INV-SSH-001 |
+| `crates/cawide-account/` | Account device-trust statements (registration, DeviceLink, MachineClaim, DeviceRevocation, host request signing, SAS) | Trust model in docs/architecture.md |
 
 Specifications: [docs/architecture.md §2.5](docs/architecture.md#25-rpc-engine-security-cratescawide-hostsrcrpc) and [docs/architecture.md §2.7](docs/architecture.md#27-forge-engine-cratescawide-hostsrcforge).
 

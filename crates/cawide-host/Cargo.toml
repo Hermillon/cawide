@@ -21,6 +21,7 @@ tracing = { workspace = true }
 bytes = { workspace = true }
 fs4 = { workspace = true }
 cawide-protocol = { path = "../cawide-protocol" }
+cawide-account = { path = "../cawide-account" }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 qrcode = { workspace = true }

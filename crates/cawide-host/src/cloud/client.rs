@@ -33,6 +33,7 @@ impl CloudConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct CloudClient {
     http: reqwest::Client,
     base_url: String,
@@ -70,31 +71,14 @@ impl CloudClient {
         })
     }
 
-    pub async fn post_json(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-        bearer: Option<&str>,
-    ) -> anyhow::Result<ApiResponse> {
-        let url = format!("{}{path}", self.base_url);
-        let mut req = self.http.post(&url);
-
-        let body_bytes = serde_json::to_vec(body).context("failed to serialize JSON body")?;
-        req = req
-            .header(CONTENT_TYPE, "application/json")
-            .body(body_bytes);
-
-        if let Some(token) = bearer {
-            req = req.header("authorization", format!("Bearer {token}"));
-        }
-
+    async fn send(&self, req: reqwest::RequestBuilder) -> anyhow::Result<ApiResponse> {
         let resp = req.send().await.map_err(|err| {
             anyhow::Error::new(err)
                 .context(format!("could not reach Cawide Cloud at {}", self.base_url))
         })?;
 
         let status = resp.status().as_u16();
-        let bytes = resp
+        let body = resp
             .bytes()
             .await
             .map_err(|err| {
@@ -103,10 +87,53 @@ impl CloudClient {
             })?
             .to_vec();
 
-        Ok(ApiResponse {
-            status,
-            body: bytes,
-        })
+        Ok(ApiResponse { status, body })
+    }
+
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        bearer: Option<&str>,
+    ) -> anyhow::Result<ApiResponse> {
+        let url = format!("{}{path}", self.base_url);
+        let body_bytes = serde_json::to_vec(body).context("failed to serialize JSON body")?;
+        let mut req = self
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body_bytes);
+
+        if let Some(token) = bearer {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+
+        self.send(req).await
+    }
+
+    pub async fn post_signed(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        host_secret: &[u8; 32],
+        node_id: &[u8; 32],
+    ) -> anyhow::Result<ApiResponse> {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let msg = cawide_account::host_request_message("POST", path, ts, &body);
+        let sig = cawide_account::sign(host_secret, &msg);
+        let url = format!("{}{path}", self.base_url);
+        let req = self
+            .http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .header(cawide_account::HEADER_HOST, hex::encode(node_id))
+            .header(cawide_account::HEADER_TIMESTAMP, ts.to_string())
+            .header(cawide_account::HEADER_SIGNATURE, hex::encode(sig))
+            .body(body);
+        self.send(req).await
     }
 
     pub async fn put_bytes(
@@ -128,22 +155,7 @@ impl CloudClient {
             req = req.header("authorization", format!("Bearer {token}"));
         }
 
-        let resp = req.send().await.map_err(|err| {
-            anyhow::Error::new(err)
-                .context(format!("could not reach Cawide Cloud at {}", self.base_url))
-        })?;
-
-        let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|err| {
-                anyhow::Error::new(err)
-                    .context(format!("failed to read response from {}", self.base_url))
-            })?
-            .to_vec();
-
-        Ok(ApiResponse { status, body })
+        self.send(req).await
     }
 
     pub async fn get(&self, path: &str, bearer: Option<&str>) -> anyhow::Result<ApiResponse> {
@@ -154,22 +166,7 @@ impl CloudClient {
             req = req.header("authorization", format!("Bearer {token}"));
         }
 
-        let resp = req.send().await.map_err(|err| {
-            anyhow::Error::new(err)
-                .context(format!("could not reach Cawide Cloud at {}", self.base_url))
-        })?;
-
-        let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|err| {
-                anyhow::Error::new(err)
-                    .context(format!("failed to read response from {}", self.base_url))
-            })?
-            .to_vec();
-
-        Ok(ApiResponse { status, body })
+        self.send(req).await
     }
 
     pub async fn delete(&self, path: &str, bearer: Option<&str>) -> anyhow::Result<ApiResponse> {
@@ -180,22 +177,7 @@ impl CloudClient {
             req = req.header("authorization", format!("Bearer {token}"));
         }
 
-        let resp = req.send().await.map_err(|err| {
-            anyhow::Error::new(err)
-                .context(format!("could not reach Cawide Cloud at {}", self.base_url))
-        })?;
-
-        let status = resp.status().as_u16();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|err| {
-                anyhow::Error::new(err)
-                    .context(format!("failed to read response from {}", self.base_url))
-            })?
-            .to_vec();
-
-        Ok(ApiResponse { status, body })
+        self.send(req).await
     }
 }
 

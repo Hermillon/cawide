@@ -1,0 +1,18 @@
+[package]
+name = "cawide-account"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Account device-trust statements for Cawide"
+
+[dependencies]
+serde = { workspace = true }
+postcard = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }

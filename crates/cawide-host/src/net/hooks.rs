@@ -12,13 +12,19 @@ use cawide_protocol::{
 pub struct CawideEndpointHooks {
     auth_store: Arc<AuthorizedKeysStore>,
     pairing_manager: Arc<PairingManager>,
+    trust_kick: Arc<crate::cloud::trust_sync::TrustKick>,
 }
 
 impl CawideEndpointHooks {
-    pub fn new(auth_store: Arc<AuthorizedKeysStore>, pairing_manager: Arc<PairingManager>) -> Self {
+    pub fn new(
+        auth_store: Arc<AuthorizedKeysStore>,
+        pairing_manager: Arc<PairingManager>,
+        trust_kick: Arc<crate::cloud::trust_sync::TrustKick>,
+    ) -> Self {
         Self {
             auth_store,
             pairing_manager,
+            trust_kick,
         }
     }
 }
@@ -39,6 +45,7 @@ impl iroh::endpoint::EndpointHooks for CawideEndpointHooks {
                     tracing::debug!(remote = %remote.fmt_short(), "accepted authorized connection");
                     iroh::endpoint::AfterHandshakeOutcome::Accept
                 } else {
+                    self.trust_kick.kick();
                     tracing::warn!(remote = %remote.fmt_short(), alpn = ?String::from_utf8_lossy(alpn), "rejected unauthorized connection");
                     reject(CLOSE_UNAUTHORIZED, b"unauthorized node id")
                 }

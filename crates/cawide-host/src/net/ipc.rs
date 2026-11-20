@@ -36,6 +36,9 @@ pub enum IpcRequest {
         url: String,
         session_id: Option<String>,
     },
+    AccountStatus,
+    AccountUnlink,
+    ListDevicesWithSource,
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum IpcResponse {
@@ -59,6 +62,14 @@ pub enum IpcResponse {
         node_id: String,
         device_name: String,
     },
+    AccountStatus {
+        account_id: Option<String>,
+        claims_disabled: bool,
+    },
+    Unlinked {
+        was_linked: bool,
+    },
+    DevicesWithSource(Vec<DeviceInfoWithSource>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -66,6 +77,14 @@ pub struct DeviceInfo {
     pub node_id: String,
     pub device_name: String,
     pub added_at_ts: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfoWithSource {
+    pub node_id: String,
+    pub device_name: String,
+    pub added_at_ts: u64,
+    pub source: String,
 }
 pub struct IpcContext {
     pub node_id: [u8; 32],
@@ -75,6 +94,7 @@ pub struct IpcContext {
     pub registry: Arc<SessionRegistry>,
     pub broadcaster: Arc<HostEventBroadcaster>,
     pub connections: Arc<ConnectionTracker>,
+    pub trust: Option<Arc<crate::cloud::trust_sync::TrustSync>>,
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -380,6 +400,41 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
             crate::web::open_url(&ctx.broadcaster, &ctx.connections, &url, session_id),
             false,
         ),
+        IpcRequest::AccountStatus => (
+            IpcResponse::AccountStatus {
+                account_id: ctx.auth_store.account_link().map(|l| l.account_id),
+                claims_disabled: ctx.auth_store.claims_disabled(),
+            },
+            false,
+        ),
+        IpcRequest::AccountUnlink => {
+            let resp = if let Some(trust) = &ctx.trust {
+                match trust.unlink().await {
+                    Ok(was_linked) => IpcResponse::Unlinked { was_linked },
+                    Err(e) => IpcResponse::Error(e.to_string()),
+                }
+            } else {
+                let store = Arc::clone(&ctx.auth_store);
+                match tokio::task::spawn_blocking(move || store.mark_unlinked_local(true)).await {
+                    Ok(Ok((was_linked, removed))) => {
+                        for pk in removed {
+                            ctx.connections.close_all(
+                                pk,
+                                cawide_protocol::CLOSE_UNAUTHORIZED,
+                                b"account unlinked",
+                            );
+                        }
+                        IpcResponse::Unlinked { was_linked }
+                    }
+                    Ok(Err(e)) => IpcResponse::Error(e.to_string()),
+                    Err(e) => IpcResponse::Error(format!("unlink task failed: {e}")),
+                }
+            };
+            (resp, false)
+        }
+        IpcRequest::ListDevicesWithSource => {
+            (crate::devices::list_with_source(&ctx.auth_store), false)
+        }
     };
 
     write_length_prefixed(&mut stream, &resp, MAX_IPC_FRAME_SIZE).await?;
