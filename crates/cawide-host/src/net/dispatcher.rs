@@ -286,9 +286,10 @@ async fn write_pty_bytes(
             .map_err(|e| std::io::Error::other(e.to_string())),
         Some(enc) => {
             for chunk in data.chunks(cawide_protocol::MAX_PTY_CHUNK_RAW) {
-                let frame = enc
-                    .encode(chunk)
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let frame = enc.encode(chunk).map_err(|e| {
+                    tracing::warn!(error = %e, chunk_len = chunk.len(), "PTY chunk encode failed");
+                    std::io::Error::other(e.to_string())
+                })?;
                 send.write_all(frame)
                     .await
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
