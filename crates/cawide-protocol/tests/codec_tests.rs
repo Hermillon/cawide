@@ -1191,3 +1191,69 @@ async fn test_pty_attach_header_v5_compat() {
     assert!(decoded.accept_chunked_output);
     assert!(!decoded.accept_input_mode_frames);
 }
+
+fn deterministic_high_entropy_bytes(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed;
+    let mut buf = Vec::with_capacity(len);
+    for _ in 0..len {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        buf.push((state >> 33) as u8);
+    }
+    buf
+}
+
+#[tokio::test]
+async fn test_pty_chunk_encoder_reuse_increasing_high_entropy_chunks() {
+    let mut encoder = PtyChunkEncoder::new().expect("encoder init");
+    let mut decoder = PtyChunkDecoder::new().expect("decoder init");
+
+    // Sequence hits C < bound <= 2*C at every step when scratch capacity is reused.
+    let sizes = [2000, 3500, 6000, 11000, 20000, 36000, MAX_PTY_CHUNK_RAW];
+    for (idx, &size) in sizes.iter().enumerate() {
+        let raw_input =
+            deterministic_high_entropy_bytes(0x9e37_79b9_7f4a_7c15 ^ (idx as u64), size);
+        let frame = encoder
+            .encode(&raw_input)
+            .unwrap_or_else(|e| panic!("encode failed at step {idx} (size={size}): {e}"));
+
+        let mut cursor = std::io::Cursor::new(frame.to_vec());
+        let decoded = decoder
+            .read_frame(&mut cursor)
+            .await
+            .expect("read_frame failed")
+            .expect("chunk present");
+        assert_eq!(
+            decoded,
+            PtyFrame::Output(raw_input),
+            "round-trip mismatch at step {idx} (size={size})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_pty_chunk_encoder_reuse_large_jump_to_max_chunk() {
+    let mut encoder = PtyChunkEncoder::new().expect("encoder init");
+    let mut decoder = PtyChunkDecoder::new().expect("decoder init");
+
+    // Sequence hits bound > 2*C on the second chunk.
+    let sizes = [MIN_PTY_COMPRESS_SIZE, MAX_PTY_CHUNK_RAW];
+    for (idx, &size) in sizes.iter().enumerate() {
+        let raw_input =
+            deterministic_high_entropy_bytes(0x1234_5678_9abc_def0 ^ (idx as u64), size);
+        let frame = encoder
+            .encode(&raw_input)
+            .unwrap_or_else(|e| panic!("encode failed at step {idx} (size={size}): {e}"));
+
+        let mut cursor = std::io::Cursor::new(frame.to_vec());
+        let decoded = decoder
+            .read_frame(&mut cursor)
+            .await
+            .expect("read_frame failed")
+            .expect("chunk present");
+        assert_eq!(
+            decoded,
+            PtyFrame::Output(raw_input),
+            "round-trip mismatch at step {idx} (size={size})"
+        );
+    }
+}

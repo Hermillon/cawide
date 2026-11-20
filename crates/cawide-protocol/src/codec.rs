@@ -727,9 +727,7 @@ impl PtyChunkEncoder {
         if raw.len() >= MIN_PTY_COMPRESS_SIZE {
             self.scratch.clear();
             let bound = zstd::compress_bound(raw.len());
-            if self.scratch.capacity() < bound {
-                self.scratch.reserve(bound - self.scratch.capacity());
-            }
+            self.scratch.reserve(bound);
             self.compressor
                 .compress_to_buffer(raw, &mut self.scratch)
                 .map_err(|e| ProtocolError::Decompress(e.to_string()))?;
