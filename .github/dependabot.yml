@@ -11,6 +11,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      - dependency-name: "rusqlite"
+      - dependency-name: "libsqlite3-sys"
 
   - package-ecosystem: "github-actions"
     directory: "/"
