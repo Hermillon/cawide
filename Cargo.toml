@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/cawide-account",
     "crates/cawide-host",
     "crates/cawide-protocol",
 ]

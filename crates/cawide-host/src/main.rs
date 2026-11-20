@@ -141,10 +141,12 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Link this computer to your Cawide account
+    /// Sign in to Cawide Cloud for profile sync
     Login,
-    /// Unlink this computer from your Cawide account
+    /// Sign out of Cawide Cloud and unlink this computer from your account
     Logout,
+    /// Remove this computer from your Cawide account and drop account-synced devices
+    Unlink,
     /// Sync your AI agent setup to Cawide Cloud
     Profile {
         #[command(subcommand)]
@@ -365,7 +367,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 pairing_active,
                                 last_input_unix,
                             } => {
-                                let payload = serde_json::json!({
+                                let mut payload = serde_json::json!({
                                     "node_id": node_id,
                                     "active_sessions": active_sessions,
                                     "active_connections": active_connections,
@@ -373,6 +375,25 @@ async fn run(cli: Cli) -> Result<()> {
                                     "pairing_active": pairing_active,
                                     "last_input_unix": last_input_unix,
                                 });
+                                match send_ipc_request(
+                                    &paths.socket_path,
+                                    &IpcRequest::AccountStatus,
+                                )
+                                .await
+                                {
+                                    Ok(IpcResponse::AccountStatus { account_id, .. }) => {
+                                        if let Some(obj) = payload.as_object_mut() {
+                                            obj.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(account_id),
+                                            );
+                                        }
+                                    }
+                                    Ok(IpcResponse::Error(e)) => bail!(e),
+                                    Ok(other) => bail!("unexpected ipc response: {other:?}"),
+                                    Err(cawide_host::net::NetError::UnexpectedIpcResponse(_)) => {}
+                                    Err(e) => return Err(e.into()),
+                                }
                                 println!("{payload}");
                             }
                             other => bail!("unexpected ipc response: {other:?}"),
@@ -429,6 +450,17 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Logout) => {
             cawide_host::cloud::login::run_logout(&config_dir()?).await?;
         }
+        Some(Command::Unlink) => {
+            use cawide_host::cloud::login::{unlink_this_computer, UnlinkOutcome};
+            match unlink_this_computer(&config_dir()?).await? {
+                UnlinkOutcome::Unlinked => println!("✔ Unlinked from Cawide account"),
+                UnlinkOutcome::NotLinked => println!("This computer is not linked to an account"),
+                UnlinkOutcome::DaemonTooOld => {
+                    eprintln!("daemon too old; update cawide");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some(Command::Profile { command }) => match command {
             ProfileCommand::Push { dry_run, output } => {
                 cawide_host::profile::commands::run_push(&config_dir()?, dry_run, output).await?;
@@ -483,6 +515,16 @@ async fn show_status(paths: &DaemonPaths, pid: Option<u32>) -> Result<()> {
         }
         IpcResponse::Error(e) => bail!(e),
         _ => bail!("unexpected response from daemon"),
+    }
+    match send_ipc_request(&paths.socket_path, &IpcRequest::AccountStatus).await {
+        Ok(IpcResponse::AccountStatus { account_id, .. }) => match account_id {
+            Some(id) => println!("Account: {id}"),
+            None => println!("Account: not linked"),
+        },
+        Ok(IpcResponse::Error(e)) => bail!(e),
+        Ok(_) => bail!("unexpected response from daemon"),
+        Err(cawide_host::net::NetError::UnexpectedIpcResponse(_)) => {}
+        Err(e) => return Err(e.into()),
     }
     if let Some(latest) = cawide_host::update::check_for_update_cached(&paths.config_dir) {
         let current = env!("CARGO_PKG_VERSION");

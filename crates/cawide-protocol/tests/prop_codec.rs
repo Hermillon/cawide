@@ -164,6 +164,12 @@ fn arb_rpc_request() -> impl Strategy<Value = RpcRequest> {
         any::<Option<(String, String)>>().prop_map(|opt| RpcRequest::SetPushChannel {
             channel: opt.map(|(channel_id, secret)| PushChannel { channel_id, secret }),
         }),
+        (any::<String>(), any::<bool>()).prop_map(|(account_id, takeover)| {
+            RpcRequest::AccountClaim {
+                account_id,
+                takeover,
+            }
+        }),
     ]
 }
 
@@ -502,6 +508,7 @@ fn arb_rpc_response() -> impl Strategy<Value = RpcResponse> {
                 })
             }),
         any::<Result<(), String>>().prop_map(RpcResponse::SetPushChannel),
+        any::<Result<Vec<u8>, String>>().prop_map(RpcResponse::AccountClaim),
     ]
 }
 

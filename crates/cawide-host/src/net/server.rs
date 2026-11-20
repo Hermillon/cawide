@@ -1,6 +1,7 @@
 //! Server engine wiring identity, gate, handlers, and IPC together.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,8 @@ use iroh::endpoint::{presets, VarInt};
 use iroh::protocol::Router;
 
 use crate::auth::{AuthorizedKeysStore, PairingManager};
+use crate::cloud::client::{CloudClient, CloudConfig};
+use crate::cloud::trust_sync::{AccountClaimer, TrustKick, TrustSync};
 use crate::net::broadcaster::HostEventBroadcaster;
 use crate::net::connections::ConnectionTracker;
 use crate::net::dispatcher::{
@@ -79,6 +82,7 @@ pub struct CawideServer {
     _ports: PortWatcher,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     ipc_task: tokio::task::JoinHandle<()>,
+    trust_task: Option<tokio::task::JoinHandle<()>>,
     socket_path: PathBuf,
 }
 
@@ -186,8 +190,15 @@ impl CawideServer {
             Arc::clone(&connections),
         );
         let secret = load_or_create_host_key(&config.config_dir.join("host_key"))?;
+        let host_secret = secret.to_bytes();
+        let trust_kick = TrustKick::new(10_000);
+        let relinked = TrustKick::new(5_000);
 
-        let hooks = CawideEndpointHooks::new(Arc::clone(&auth_store), Arc::clone(&pairing_manager));
+        let hooks = CawideEndpointHooks::new(
+            Arc::clone(&auth_store),
+            Arc::clone(&pairing_manager),
+            Arc::clone(&trust_kick),
+        );
         let transport_config = iroh::endpoint::QuicTransportConfig::builder()
             // Revert to noq default controller (Cubic) due to app-limited pacing collapse in BBRv3
             .initial_rtt(Duration::from_millis(100))
@@ -244,6 +255,34 @@ impl CawideServer {
             }
         }
         let node_id = *endpoint.id().as_bytes();
+        let claimed = Arc::new(AtomicBool::new(true));
+        let account = Arc::new(AccountClaimer::new(
+            Arc::clone(&auth_store),
+            host_secret,
+            node_id,
+            Arc::clone(&relinked),
+            Arc::clone(&claimed),
+        ));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (trust, trust_task) = if config.network_mode == NetworkMode::N0 {
+            let cfg = CloudConfig::from_env().map_err(|e| NetError::Bind(e.to_string()))?;
+            let client = CloudClient::new(&cfg).map_err(|e| NetError::Bind(e.to_string()))?;
+            let sync = TrustSync::new(
+                client,
+                Arc::clone(&auth_store),
+                Arc::clone(&connections),
+                endpoint.clone(),
+                host_secret,
+                node_id,
+                Arc::clone(&trust_kick),
+                Arc::clone(&relinked),
+                Arc::clone(&claimed),
+            );
+            let task = Arc::clone(&sync).spawn(shutdown_tx.subscribe());
+            (Some(sync), Some(task))
+        } else {
+            (None, None)
+        };
         let push =
             crate::push::PushService::open(&config.config_dir, Arc::clone(&auth_store), node_id);
         push.spawn_dispatcher(alert_rx);
@@ -263,6 +302,7 @@ impl CawideServer {
                     forge_service,
                     git_host_env,
                     push,
+                    account,
                 },
             )
             .accept(
@@ -278,7 +318,6 @@ impl CawideServer {
         }
         let router = router_builder.spawn();
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let ctx = Arc::new(IpcContext {
             node_id,
             endpoint,
@@ -287,6 +326,7 @@ impl CawideServer {
             registry: Arc::clone(&registry),
             broadcaster: Arc::clone(&broadcaster),
             connections: Arc::clone(&connections),
+            trust,
             shutdown_tx: shutdown_tx.clone(),
         });
         let ipc_task = tokio::spawn(serve_ipc(listener, ctx, shutdown_rx));
@@ -302,6 +342,7 @@ impl CawideServer {
             _ports,
             shutdown_tx,
             ipc_task,
+            trust_task,
             socket_path,
         })
     }
@@ -348,6 +389,11 @@ impl CawideServer {
         self.shutdown_tx.send_replace(true);
         if let Err(e) = self.ipc_task.await {
             tracing::warn!(error = %e, "ipc task failed");
+        }
+        if let Some(task) = self.trust_task {
+            if let Err(e) = task.await {
+                tracing::warn!(error = %e, "trust sync task failed");
+            }
         }
         if let Err(e) = self.router.shutdown().await {
             tracing::warn!(error = %e, "router shutdown task panicked");

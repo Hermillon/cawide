@@ -177,6 +177,7 @@ pub struct CawideProtocolHandler {
     pub forge_service: Arc<crate::forge::ForgeService>,
     pub git_host_env: Arc<crate::rpc::git::env::GitHostEnv>,
     pub push: Arc<crate::push::PushService>,
+    pub account: Arc<crate::cloud::trust_sync::AccountClaimer>,
 }
 
 /// Per-connection state shared by that connection's stream tasks.
@@ -255,6 +256,7 @@ async fn handle_stream(
                 &handler.forge_service,
                 &handler.git_host_env,
                 &handler.push,
+                &handler.account,
                 &state,
                 send,
                 recv,
@@ -760,6 +762,7 @@ async fn handle_rpc_stream(
     forge: &crate::forge::ForgeService,
     git_host_env: &crate::rpc::git::env::GitHostEnv,
     push: &crate::push::PushService,
+    account: &Arc<crate::cloud::trust_sync::AccountClaimer>,
     state: &ConnState,
     mut send: SendStream,
     mut recv: RecvStream,
@@ -789,6 +792,7 @@ async fn handle_rpc_stream(
             forge,
             git_host_env,
             push,
+            account,
             state,
             frame.payload,
         )
@@ -849,6 +853,7 @@ async fn dispatch_rpc(
     forge: &crate::forge::ForgeService,
     git_host_env: &crate::rpc::git::env::GitHostEnv,
     push: &crate::push::PushService,
+    account: &Arc<crate::cloud::trust_sync::AccountClaimer>,
     state: &ConnState,
     req: RpcRequest,
 ) -> RpcResponse {
@@ -992,6 +997,19 @@ async fn dispatch_rpc(
         }
         RpcRequest::SetPushChannel { channel } => {
             RpcResponse::SetPushChannel(push.set_channel(client_node_id, channel).await)
+        }
+        RpcRequest::AccountClaim {
+            account_id,
+            takeover,
+        } => {
+            let account = Arc::clone(account);
+            RpcResponse::AccountClaim(
+                tokio::task::spawn_blocking(move || {
+                    account.claim(client_node_id, &account_id, takeover)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("claim task failed: {e}"))),
+            )
         }
     }
 }
