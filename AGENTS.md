@@ -9,7 +9,7 @@ This document defines the governing architectural invariants, wire protocol cont
 | **Direct Keystroke Path** | Keystrokes MUST route directly to the QUIC PTY stream without dispatching through main-thread runloop queues or UI layout passes. Client terminal engines MUST render immediately on local echo or raw PTY read. |
 | **Zero Head-of-Line Blocking** | Multiplexing MUST isolate failure domains over independent RFC 9000 QUIC streams: PTY (`0x04`), Control (`0x02`), RPC (`0x03`), and Tunnel (`0x05`). A stall or backpressure on RPC or Tunnel streams MUST NOT impede PTY input/output. |
 | **Session Indestructibility** | Host child processes, shells, and agent CLI sessions MUST survive client disconnections, IP roaming, cellular handoffs, and background suspension. Sessions persist across transport resets via the ring buffer and headless PTY master. |
-| **Host Ring-Buffer & Backpressure Limits** | PTY ring buffer MUST enforce `DEFAULT_RING_BUFFER_CAPACITY = 4 MiB`, 2 MiB replay ceiling, and max 10,000 lines scrollback. QUIC stream backpressure MUST bound writes at 32 KB per 16 ms. |
+| **Host Ring-Buffer & Backpressure Limits** | PTY ring buffer MUST enforce `DEFAULT_RING_BUFFER_CAPACITY = 4 MiB`, 2 MiB replay ceiling, and max 10,000 lines scrollback. Host PTY output is coalesced at 16 ms (`PTY_COALESCE_INTERVAL` in `crates/cawide-host/src/net/dispatcher.rs`) and chunked frames are capped at `MAX_PTY_CHUNK_RAW = 64 KiB` (`crates/cawide-protocol/src/codec.rs`). |
 | **Zero-Trust TOFU Security** | Ephemeral pairing MUST operate over ALPN `cawide/pair/1` with a 5-minute TTL. Active sessions MUST operate over ALPN `cawide/5` with mTLS 1.3 using raw Ed25519 keys. Unrecognized node IDs MUST be rejected at `EndpointHooks::after_handshake` with close code `0x01` (`CLOSE_UNAUTHORIZED`) prior to stream acceptance. Account-synced keys are admitted only through a verified mutual-signature `DeviceLink` path from a locally paired key; Cawide Cloud can revoke but never grant. |
 
 ---
@@ -44,7 +44,7 @@ Each QUIC bi-directional stream initiated by the client MUST begin with a 1-byte
 - `0x14`: `STREAM_ERR_SESSION_OCCUPIED` - Session currently attached by another client.
 - `0x15`: `STREAM_ERR_SESSION_TAKEN` - Session taken over by higher-priority attachment.
 - `0x16`: `STREAM_ERR_SESSION_GONE` - Child process exited and session is destroyed.
-- `0x17`: `STREAM_ERR_RESYNC` - Client offset fell behind ring buffer; client MUST re-attach for screen snapshot.
+- `0x17`: `STREAM_ERR_RESYNC` - Live-attached client fell behind the ring buffer while streaming; client MUST re-attach to receive a screen snapshot.
 
 ---
 
@@ -60,7 +60,7 @@ This domain covers `crates/cawide-protocol`, `crates/cawide-account`, and `crate
 | **Async Runtime** | Tokio multi-threaded runtime MUST drive network I/O, QUIC streams, and timers. Async tasks MUST NOT execute blocking operations directly. |
 | **Blocking Work Isolation** | Blocking filesystem operations, PTY read loops, and process spawns MUST use `tokio::task::spawn_blocking` to avoid stalling reactor threads. |
 | **PTY Ring Buffer** | The PTY ring buffer MUST enforce `DEFAULT_RING_BUFFER_CAPACITY = 4 MiB`, a replay ceiling of 2 MiB, and a maximum scrollback of 10,000 lines. |
-| **Ring Underrun Resync** | If a client attach request presents an offset that has been overwritten by the ring buffer, the host MUST reset the stream with `0x17` (`STREAM_ERR_RESYNC`). The client re-attaches to receive a terminal screen snapshot. |
+| **Ring Underrun Resync** | On attach, an offset outside the retained ring, or more than `MAX_REPLAY_BYTES` behind head, MUST receive `PtyAttachAck::Snapshot` (or `SnapshotGzip`) with no stream reset. A live-attached client that falls behind the ring while streaming MUST be reset with `0x17` (`STREAM_ERR_RESYNC`); it re-attaches with its current received offset and receives a snapshot. |
 | **Serialization** | All wire DTOs on Control and RPC streams MUST serialize using `postcard`. Length prefixes MUST precede payloads: 4-byte big-endian for Control (max 64 KB) and RPC (max 16 MB; negotiated zstd compression via bit 31 flag and trailing caps byte). |
 | **Zero-Copy Stream I/O** | PTY byte streaming between PTY master and QUIC stream MUST minimize memory allocations using bounded buffers. |
 
@@ -76,7 +76,7 @@ This domain covers `crates/cawide-protocol`, `crates/cawide-account`, and `crate
 Specifications: [docs/architecture.md §2.5](docs/architecture.md#25-rpc-engine-security-cratescawide-hostsrcrpc) and [docs/architecture.md §2.7](docs/architecture.md#27-forge-engine-cratescawide-hostsrcforge).
 
 ### 3.4 Verification Commands
-Run from repository root:
+Run from the `cawide` repository root (the `oss/cawide` submodule root when checked out in cawide-production, since the parent workspace excludes `oss`):
 ```bash
 cargo check --workspace --all-targets
 cargo test --workspace
