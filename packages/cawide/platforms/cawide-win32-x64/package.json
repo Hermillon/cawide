@@ -1,6 +1,6 @@
 {
   "name": "cawide-win32-x64",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Prebuilt cawide binary for win32/x64 (x86_64-pc-windows-msvc)",
   "homepage": "https://cawide.dev",
   "license": "Apache-2.0",
