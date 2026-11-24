@@ -72,6 +72,7 @@ This domain covers `crates/cawide-protocol`, `crates/cawide-account`, and `crate
 | `crates/cawide-host/src/rpc/git/` | Git engine behind the `Git { root, op: GitOp }` envelope: hardened `git` CLI, staging, LFS detection, history graph, branches, remotes, stash, sequencer, SSH host-key policy | INV-GIT-001/002/003, INV-LFS-001, INV-SSH-001 |
 | `crates/cawide-host/src/forge/` | Forge engine behind `ForgeAccounts`/`Forge` RPCs: REST adapters (GitHub, GitLab, Gitea, Bitbucket, Azure DevOps), capability table, flock-guarded account store, `cawide git-credential` helper, SSH key/host-key trust | INV-FORGE-001/002, INV-SSH-001 |
 | `crates/cawide-account/` | Account device-trust statements (registration, DeviceLink, MachineClaim, DeviceRevocation, host request signing, SAS) | Trust model in docs/architecture.md |
+| `crates/cawide-host/src/agent/` | PTY-gated telemetry (`AgentStream`), `AgentRespond`, E2E push (`push.rs`) | `docs/architecture.md` §4 |
 
 Specifications: [docs/architecture.md §2.5](docs/architecture.md#25-rpc-engine-security-cratescawide-hostsrcrpc) and [docs/architecture.md §2.7](docs/architecture.md#27-forge-engine-cratescawide-hostsrcforge).
 

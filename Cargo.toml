@@ -56,6 +56,8 @@ sha1 = "0.10"
 fs4 = { version = "0.12", default-features = false, features = ["sync"] }
 zstd = { version = "0.14", default-features = false }
 mdns-sd = "0.21"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
 tempfile = "3"
 
 [profile.dev]

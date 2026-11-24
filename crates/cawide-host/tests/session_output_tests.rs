@@ -211,6 +211,7 @@ fn test_terminal_signals() {
         TerminalSignals {
             title: None,
             progress_active: false,
+            run_status: None,
         }
     );
 
@@ -278,6 +279,50 @@ fn test_terminal_signals() {
     // OSC 7501 state=clear
     output.write(b"\x1b]7501;state=clear\x1b\\");
     assert!(!output.signals().progress_active);
+
+    // OSC 7501 working / blocked / done / error / idle with kind and base64 msg
+    use base64::Engine as _;
+    use cawide_host::pty::output::{OscRunStatus, OscStatusKind};
+    let msg_b64 = base64::engine::general_purpose::STANDARD.encode("Approve bash?");
+    output.write(b"\x1b]7501;state=working\x1b\\");
+    let s1 = output.signals();
+    assert!(s1.progress_active);
+    let seq1 = s1.run_status.as_ref().unwrap().seq;
+    assert_eq!(s1.run_status.as_ref().unwrap().kind, OscStatusKind::Working);
+
+    output.write(format!("\x1b]7501;state=blocked:kind=approval:msg={msg_b64}\x1b\\").as_bytes());
+    let s2 = output.signals();
+    assert!(s2.progress_active);
+    let rs2 = s2.run_status.unwrap();
+    assert!(rs2.seq > seq1);
+    assert_eq!(
+        rs2,
+        OscRunStatus {
+            kind: OscStatusKind::Blocked {
+                kind: Some("approval".into())
+            },
+            message: Some("Approve bash?".into()),
+            seq: rs2.seq,
+        }
+    );
+
+    // Invalid base64 msg is ignored without dropping state
+    output.write(b"\x1b]7501;state=done:msg=!!!not-base64!!!\x1b\\");
+    let s3 = output.signals();
+    assert!(!s3.progress_active);
+    let rs3 = s3.run_status.unwrap();
+    assert!(rs3.seq > rs2.seq);
+    assert_eq!(rs3.kind, OscStatusKind::Done);
+    assert_eq!(rs3.message, None);
+
+    output.write(b"\x1b]7501;state=error\x1b\\");
+    let s4 = output.signals();
+    assert!(!s4.progress_active);
+    assert_eq!(s4.run_status.as_ref().unwrap().kind, OscStatusKind::Error);
+
+    output.clear_progress();
+    assert!(!output.signals().progress_active);
+    assert_eq!(output.signals().run_status, None);
 }
 
 #[test]

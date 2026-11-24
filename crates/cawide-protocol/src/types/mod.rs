@@ -13,9 +13,11 @@ pub use git::*;
 pub use control::{AgentState, AgentStatus, ControlMessage, HostEvent, SessionSummary};
 pub use pty::{PtyAttachAck, PtyAttachHeader};
 pub use rpc::{
-    DiffHunk, DiffLine, DiffLineKind, FsChunk, FsEntry, FsReadResult, FsSearchResult, HostInfo,
-    ListeningPort, PushChannel, RpcFrame, RpcRequest, RpcResponse, VoiceCompileResult,
-    FS_READ_CHUNK_MAX_BYTES, FS_SEARCH_MAX_RESULTS, FS_SEARCH_MAX_VISITED_ENTRIES,
-    FS_UPLOAD_MAX_BYTES, MAX_CHUNKED_FILE_SIZE, MAX_DIFF_BYTES, MAX_FILE_SIZE, MAX_SESSIONS,
+    AgentChoice, DiffHunk, DiffLine, DiffLineKind, FsChunk, FsEntry, FsReadResult, FsSearchResult,
+    HostInfo, ListeningPort, PushChannel, PushChannelV2, RpcFrame, RpcRequest, RpcResponse,
+    VoiceCompileResult, FS_READ_CHUNK_MAX_BYTES, FS_SEARCH_MAX_RESULTS,
+    FS_SEARCH_MAX_VISITED_ENTRIES, FS_UPLOAD_MAX_BYTES, MAX_CHUNKED_FILE_SIZE, MAX_DIFF_BYTES,
+    MAX_FILE_SIZE, MAX_SESSIONS, PUSH_CAP_ACTIONS, PUSH_CAP_E2E_CONTENT, PUSH_CAP_LIVE_ACTIVITY,
+    PUSH_CAP_PUSH_TO_START,
 };
 pub use tunnel::{TunnelAck, TunnelFailure, TunnelOpen, MAX_TUNNEL_HEADER_SIZE};

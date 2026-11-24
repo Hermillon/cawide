@@ -4,6 +4,7 @@
 use std::num::NonZeroU16;
 
 use crate::pty::ring_buffer::{SliceResult, Utf8RingBuffer, DEFAULT_RING_BUFFER_CAPACITY};
+use base64::Engine as _;
 
 pub const SNAPSHOT_SCROLLBACK_LINES: usize = 10_000; // host-side history kept for snapshots
 pub const MAX_REPLAY_BYTES: u64 = 2 * 1024 * 1024; // 2 MiB
@@ -14,6 +15,8 @@ const MAX_TITLE_CHARS: usize = 256;
 struct TermSignals {
     title: Option<String>,
     progress_active: bool,
+    run_status: Option<OscRunStatus>,
+    osc_seq: u64,
 }
 
 impl vt100::Callbacks for TermSignals {
@@ -31,18 +34,62 @@ impl vt100::Callbacks for TermSignals {
                 self.progress_active = matches!(*state, b"1" | b"3");
             }
             [b"7501", rest @ ..] if !rest.is_empty() => {
+                let mut parsed_state: Option<&[u8]> = None;
+                let mut parsed_kind: Option<String> = None;
+                let mut parsed_msg: Option<String> = None;
                 for part in rest {
                     for item in part.split(|&b| b == b':' || b == b';') {
                         if let Some(eq_idx) = item.iter().position(|&b| b == b'=') {
                             let key = &item[..eq_idx];
                             let val = &item[eq_idx + 1..];
                             if key == b"state" {
-                                if val == b"busy" || val == b"running" {
-                                    self.progress_active = true;
-                                } else if val == b"clear" || val == b"idle" {
-                                    self.progress_active = false;
+                                parsed_state = Some(val);
+                            } else if key == b"kind" {
+                                let s = sanitize_osc_text(val, 64);
+                                if !s.is_empty() {
+                                    parsed_kind = Some(s);
                                 }
+                            } else if key == b"msg" {
+                                parsed_msg = decode_osc_msg(val);
                             }
+                        }
+                    }
+                }
+                if let Some(state) = parsed_state {
+                    let kind = match state {
+                        b"working" | b"busy" | b"running" => Some(OscStatusKind::Working),
+                        b"blocked" => Some(OscStatusKind::Blocked { kind: parsed_kind }),
+                        b"done" => Some(OscStatusKind::Done),
+                        b"error" => Some(OscStatusKind::Error),
+                        b"idle" | b"clear" => Some(OscStatusKind::Idle),
+                        _ => None,
+                    };
+                    if let Some(kind) = kind {
+                        self.osc_seq += 1;
+                        self.progress_active =
+                            matches!(kind, OscStatusKind::Working | OscStatusKind::Blocked { .. });
+                        self.run_status = Some(OscRunStatus {
+                            kind,
+                            message: parsed_msg,
+                            seq: self.osc_seq,
+                        });
+                    }
+                } else if parsed_msg.is_some() || parsed_kind.is_some() {
+                    if let Some(rs) = &mut self.run_status {
+                        let mut updated = false;
+                        if let Some(msg) = parsed_msg {
+                            rs.message = Some(msg);
+                            updated = true;
+                        }
+                        if let Some(k) = parsed_kind {
+                            if let OscStatusKind::Blocked { kind } = &mut rs.kind {
+                                *kind = Some(k);
+                                updated = true;
+                            }
+                        }
+                        if updated {
+                            self.osc_seq += 1;
+                            rs.seq = self.osc_seq;
                         }
                     }
                 }
@@ -63,10 +110,51 @@ fn sanitize_title(raw: &[u8]) -> Option<String> {
     }
 }
 
+fn sanitize_osc_text(raw: &[u8], max_chars: usize) -> String {
+    let lossy = String::from_utf8_lossy(raw);
+    let filtered: String = lossy.chars().filter(|c| !c.is_control()).collect();
+    filtered.trim().chars().take(max_chars).collect()
+}
+
+fn decode_osc_msg(raw: &[u8]) -> Option<String> {
+    if raw.is_empty() || raw.len() > 2048 {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(raw))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(raw))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw))
+        .ok()?;
+    let text = sanitize_osc_text(&decoded, 280);
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OscStatusKind {
+    Working,
+    Blocked { kind: Option<String> },
+    Done,
+    Error,
+    Idle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OscRunStatus {
+    pub kind: OscStatusKind,
+    pub message: Option<String>,
+    pub seq: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSignals {
     pub title: Option<String>,
     pub progress_active: bool,
+    pub run_status: Option<OscRunStatus>,
 }
 #[derive(Debug)]
 pub enum AttachStart {
@@ -115,14 +203,22 @@ impl SessionOutput {
     }
 
     pub fn signals(&self) -> TerminalSignals {
+        let cb = self.terminal.callbacks();
         TerminalSignals {
-            title: self.terminal.callbacks().title.clone(),
-            progress_active: self.terminal.callbacks().progress_active,
+            title: cb.title.clone(),
+            progress_active: cb.progress_active,
+            run_status: cb.run_status.clone(),
         }
     }
 
+    pub fn osc_seq(&self) -> u64 {
+        self.terminal.callbacks().osc_seq
+    }
+
     pub fn clear_progress(&mut self) {
-        self.terminal.callbacks_mut().progress_active = false;
+        let cb = self.terminal.callbacks_mut();
+        cb.progress_active = false;
+        cb.run_status = None;
     }
     pub fn read_slice(&self, from_offset: u64) -> SliceResult {
         self.ring.read_slice(from_offset)

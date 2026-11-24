@@ -201,6 +201,32 @@ fn test_rpc_requests_and_responses_roundtrip() {
             account_id: "user-1".to_string(),
             takeover: true,
         },
+        RpcRequest::SetPushChannelV2 {
+            channel: Some(PushChannelV2 {
+                channel_id: "chan-v2".to_string(),
+                secret: "secret-v2".to_string(),
+                content_key: vec![0xAB; 32],
+                caps: PUSH_CAP_E2E_CONTENT
+                    | PUSH_CAP_LIVE_ACTIVITY
+                    | PUSH_CAP_ACTIONS
+                    | PUSH_CAP_PUSH_TO_START,
+            }),
+        },
+        RpcRequest::SetPushChannelV2 { channel: None },
+        RpcRequest::AgentRespond {
+            session_id: "sess-1".to_string(),
+            prompt_id: 42,
+            prompt: "Allow bash?".to_string(),
+            choice: AgentChoice::Option { index: 0 },
+        },
+        RpcRequest::AgentRespond {
+            session_id: "sess-1".to_string(),
+            prompt_id: 0,
+            prompt: "What next?".to_string(),
+            choice: AgentChoice::Text {
+                text: "Proceed".to_string(),
+            },
+        },
     ];
 
     for req in requests {
@@ -383,6 +409,10 @@ fn test_rpc_requests_and_responses_roundtrip() {
         RpcResponse::SetPushChannel(Err("push registration failed".into())),
         RpcResponse::AccountClaim(Ok(vec![1, 2, 3])),
         RpcResponse::AccountClaim(Err("linked to another account".into())),
+        RpcResponse::SetPushChannelV2(Ok(())),
+        RpcResponse::SetPushChannelV2(Err("invalid key".into())),
+        RpcResponse::AgentRespond(Ok(())),
+        RpcResponse::AgentRespond(Err("prompt no longer open".into())),
     ];
 
     for resp in responses {
@@ -899,4 +929,192 @@ fn test_voice_compile_rpc_roundtrip() {
     let decoded: RpcResponse =
         postcard::from_bytes(&bytes).expect("deserialize voice compile err resp");
     assert_eq!(err_resp, decoded);
+}
+
+#[test]
+fn rpc_variant_indices_are_append_only() {
+    let requests: Vec<(u8, RpcRequest)> = vec![
+        (
+            0,
+            RpcRequest::FsList {
+                root: "/r".into(),
+                path: ".".into(),
+                recursive: false,
+            },
+        ),
+        (
+            1,
+            RpcRequest::FsRead {
+                root: "/r".into(),
+                path: "a".into(),
+                offset: 0,
+                length: 1,
+            },
+        ),
+        (
+            2,
+            RpcRequest::FsSearch {
+                root: "/r".into(),
+                query: "q".into(),
+            },
+        ),
+        (
+            3,
+            RpcRequest::FsUpload {
+                filename: "f".into(),
+                data: vec![],
+            },
+        ),
+        (
+            4,
+            RpcRequest::RemoteOpen {
+                root: "/r".into(),
+                target: "t".into(),
+            },
+        ),
+        (
+            5,
+            RpcRequest::Git {
+                root: "/r".into(),
+                op: GitOp::Status,
+            },
+        ),
+        (
+            6,
+            RpcRequest::ForgeAccounts {
+                op: ForgeAccountOp::List,
+            },
+        ),
+        (
+            7,
+            RpcRequest::Forge {
+                root: "/r".into(),
+                account: None,
+                op: ForgeRepoOp::Repository,
+            },
+        ),
+        (8, RpcRequest::SessionList),
+        (
+            9,
+            RpcRequest::SessionCreate {
+                session_id: "s".into(),
+                command: None,
+                workdir: None,
+            },
+        ),
+        (
+            10,
+            RpcRequest::SessionKill {
+                session_id: "s".into(),
+            },
+        ),
+        (11, RpcRequest::HostInfo),
+        (
+            12,
+            RpcRequest::FsReadChunk {
+                root: "/r".into(),
+                path: "a".into(),
+                offset: 0,
+                length: 0,
+            },
+        ),
+        (13, RpcRequest::PortList),
+        (
+            14,
+            RpcRequest::VoiceCompilePrompt {
+                session_id: "s".into(),
+                transcript: "t".into(),
+                active_file: None,
+                language_mode: "en".into(),
+            },
+        ),
+        (15, RpcRequest::SetPushChannel { channel: None }),
+        (
+            16,
+            RpcRequest::AccountClaim {
+                account_id: "a".into(),
+                takeover: false,
+            },
+        ),
+        (17, RpcRequest::SetPushChannelV2 { channel: None }),
+        (
+            18,
+            RpcRequest::AgentRespond {
+                session_id: "s".into(),
+                prompt_id: 1,
+                prompt: "p".into(),
+                choice: AgentChoice::Option { index: 0 },
+            },
+        ),
+    ];
+
+    for (expected_idx, req) in requests {
+        let bytes = postcard::to_allocvec(&req).expect("serialize RpcRequest");
+        assert_eq!(
+            bytes[0], expected_idx,
+            "RpcRequest variant index mismatch for {req:?}"
+        );
+    }
+
+    let responses: Vec<(u8, RpcResponse)> = vec![
+        (0, RpcResponse::FsList(Ok(vec![]))),
+        (1, RpcResponse::FsRead(Err("e".into()))),
+        (2, RpcResponse::FsSearch(Ok(vec![]))),
+        (3, RpcResponse::FsUpload(Ok("p".into()))),
+        (4, RpcResponse::RemoteOpen(Ok(()))),
+        (
+            5,
+            RpcResponse::Git {
+                result: Err(GitError {
+                    kind: GitErrorKind::InvalidArgument,
+                    message: "e".into(),
+                    host: None,
+                    port: None,
+                }),
+            },
+        ),
+        (
+            6,
+            RpcResponse::ForgeAccounts {
+                result: Err(ForgeError {
+                    kind: ForgeErrorKind::InvalidArgument,
+                    message: "e".into(),
+                    git_kind: None,
+                    host: None,
+                    port: None,
+                }),
+            },
+        ),
+        (
+            7,
+            RpcResponse::Forge {
+                result: Err(ForgeError {
+                    kind: ForgeErrorKind::InvalidArgument,
+                    message: "e".into(),
+                    git_kind: None,
+                    host: None,
+                    port: None,
+                }),
+            },
+        ),
+        (8, RpcResponse::SessionList(Ok(vec![]))),
+        (9, RpcResponse::SessionCreate(Err("e".into()))),
+        (10, RpcResponse::SessionKill(Ok(()))),
+        (11, RpcResponse::HostInfo(Err("e".into()))),
+        (12, RpcResponse::FsReadChunk(Err("e".into()))),
+        (13, RpcResponse::PortList(Ok(vec![]))),
+        (14, RpcResponse::VoiceCompilePrompt(Err("e".into()))),
+        (15, RpcResponse::SetPushChannel(Ok(()))),
+        (16, RpcResponse::AccountClaim(Ok(vec![]))),
+        (17, RpcResponse::SetPushChannelV2(Ok(()))),
+        (18, RpcResponse::AgentRespond(Ok(()))),
+    ];
+
+    for (expected_idx, resp) in responses {
+        let bytes = postcard::to_allocvec(&resp).expect("serialize RpcResponse");
+        assert_eq!(
+            bytes[0], expected_idx,
+            "RpcResponse variant index mismatch for {resp:?}"
+        );
+    }
 }

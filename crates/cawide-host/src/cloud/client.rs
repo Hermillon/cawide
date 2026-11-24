@@ -179,6 +179,15 @@ impl CloudClient {
 
         self.send(req).await
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_insecure_for_test(base_url: String) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        Self { http, base_url }
+    }
 }
 
 #[cfg(test)]
