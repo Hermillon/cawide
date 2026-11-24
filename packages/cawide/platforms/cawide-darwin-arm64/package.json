@@ -1,6 +1,6 @@
 {
   "name": "cawide-darwin-arm64",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Prebuilt cawide binary for darwin/arm64 (aarch64-apple-darwin)",
   "homepage": "https://cawide.dev",
   "license": "Apache-2.0",
