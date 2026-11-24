@@ -955,6 +955,7 @@ mod tests {
         assert!(reg2.bump() > reg1.bump());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_registry_emits_activity_events_and_project_title() {
         use crate::agent::map::{AttentionKind, AttentionSpec, SignalResolution, TurnOutcome};
