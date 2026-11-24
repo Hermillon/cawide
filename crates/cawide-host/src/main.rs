@@ -124,6 +124,8 @@ enum Command {
         agent: String,
         #[arg(long)]
         event: Option<String>,
+        #[arg(long, conflicts_with_all = ["event", "payload"])]
+        stream: bool,
         payload: Option<String>,
     },
     /// Configure shell hooks for an agent
@@ -232,6 +234,7 @@ fn main() -> Result<()> {
     if let Some(Command::Hook {
         agent,
         event,
+        stream,
         payload,
     }) = &cli.command
     {
@@ -239,11 +242,15 @@ fn main() -> Result<()> {
             .enable_all()
             .build()
         {
-            rt.block_on(cawide_host::agent::hook::run_hook(
-                agent,
-                event.as_deref(),
-                payload.as_deref(),
-            ));
+            if *stream {
+                rt.block_on(cawide_host::agent::hook::run_hook_stream(agent));
+            } else {
+                rt.block_on(cawide_host::agent::hook::run_hook(
+                    agent,
+                    event.as_deref(),
+                    payload.as_deref(),
+                ));
+            }
         }
         std::process::exit(0);
     }

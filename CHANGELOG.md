@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Long-lived OMP v3 streaming extension (`// cawide-telemetry v3`) and `cawide hook omp --stream` (`IpcRequest::AgentStream`) with `epoch`/`seq` ordering, `plan_review_requested`/`resolved`, `tool_approval_requested`/`resolved`, `ask` options, `awaitingAsyncWork`/`willContinue`, and `finalTextHead`/`finalTextTail` question detection.
+- `RpcRequest::SetPushChannelV2` (`PushChannelV2` with `PUSH_CAP_*` capability flags) and `RpcRequest::AgentRespond` (`AgentChoice`) for remote approval, ask, plan review (`ResolvePlanReview`), and text replies.
+- End-to-end push payload encryption (`ChaCha20-Poly1305` with bound AAD and fresh 12-byte nonce) for alert notifications and Live Activity content states.
+- Serial per-`(channel_id, session_id)` Live Activity dispatch with monotonic Unix-second timestamps, 20 s tool-step coalescing, and `PUSH_CAP_PUSH_TO_START` `start_attributes`.
+- OSC 7501 (`working|blocked|done|error|idle`) fallback in `TermSignals` and `AgentTracker` when hook updates are absent or stall during `Thinking`.
+
+### Changed
+- Enforced strict PTY gating in `cawide hook` and generated JS extensions: both `CAWIDE_SESSION_ID` and `CAWIDE_SOCKET` are required (removed workdir and default-socket fallbacks).
+- Removed host-side `last_input_unix` push suppression so clients handle session-level foreground suppression directly.
+
+### Fixed
+- Isolated `auto_setup_all` in `CawideServer::bind` to run only when `config.config_dir` matches the default `config_dir()`, preventing test/dev daemons from overwriting user agent configs.
+
 ## [0.14.0] - 2026-11-23
 
 ### Added

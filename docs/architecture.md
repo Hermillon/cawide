@@ -205,23 +205,30 @@ pub const FS_SEARCH_MAX_VISITED_ENTRIES: usize = 20_000;
 pub const FS_SEARCH_MAX_RESULTS: usize = 100;
 pub const MAX_SESSIONS: usize = 32;                     // Session retention limit
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum RpcRequest {
-    FsList { path: String, recursive: bool },
-    FsRead { path: String, offset: u64, length: u32 },
-    FsSearch { query: String },
+    FsList { root: String, path: String, recursive: bool },
+    FsRead { root: String, path: String, offset: u64, length: u32 },
+    FsSearch { root: String, query: String },
     FsUpload { filename: String, data: Vec<u8> },
-    RemoteOpen { target: String },
+    RemoteOpen { root: String, target: String },
     Git { root: String, op: GitOp },                     // envelope for every git operation (status, diff, stage, commit, branches, remotes, stash, …)
     ForgeAccounts { op: ForgeAccountOp },                // forge account / credential / SSH trust management
     Forge { root: String, account: Option<String>, op: ForgeRepoOp }, // pull requests, reviews, checks, merge
     SessionList,
-    SessionCreate { session_id: String, command: Option<String> },
+    SessionCreate { session_id: String, command: Option<String>, workdir: Option<String> },
     SessionKill { session_id: String },
-    FsReadChunk { path: String, offset: u64, length: u32 },
+    HostInfo,
+    FsReadChunk { root: String, path: String, offset: u64, length: u32 },
+    PortList,
+    VoiceCompilePrompt { session_id: String, transcript: String, active_file: Option<String>, language_mode: String },
+    SetPushChannel { channel: Option<PushChannel> },
+    AccountClaim { account_id: String, takeover: bool },
+    SetPushChannelV2 { channel: Option<PushChannelV2> },
+    AgentRespond { session_id: String, prompt_id: u64, prompt: String, choice: AgentChoice },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum RpcResponse {
     FsList(Result<Vec<FsEntry>, String>),
     FsRead(Result<FsReadResult, String>),
@@ -234,7 +241,39 @@ pub enum RpcResponse {
     SessionList(Result<Vec<SessionSummary>, String>),
     SessionCreate(Result<SessionSummary, String>),
     SessionKill(Result<(), String>),
+    HostInfo(Result<HostInfo, String>),
     FsReadChunk(Result<FsChunk, String>),
+    PortList(Result<Vec<ListeningPort>, String>),
+    VoiceCompilePrompt(Result<VoiceCompileResult, String>),
+    SetPushChannel(Result<(), String>),
+    AccountClaim(Result<Vec<u8>, String>), // postcard(cawide_account::HostClaimProof)
+    SetPushChannelV2(Result<(), String>),
+    AgentRespond(Result<(), String>),
+}
+
+pub const PUSH_CAP_E2E_CONTENT: u32 = 1;
+pub const PUSH_CAP_LIVE_ACTIVITY: u32 = 2;
+pub const PUSH_CAP_ACTIONS: u32 = 4;
+pub const PUSH_CAP_PUSH_TO_START: u32 = 8;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PushChannel {
+    pub channel_id: String,
+    pub secret: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PushChannelV2 {
+    pub channel_id: String,
+    pub secret: String,
+    pub content_key: Vec<u8>, // 32 bytes when PUSH_CAP_E2E_CONTENT is set
+    pub caps: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AgentChoice {
+    Option { index: u32 },
+    Text { text: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -412,17 +451,26 @@ The forge engine serves `ForgeAccounts { op }` and `Forge { root, account, op }`
   - `IpcRequest::Pair`: Generates single-use 5-minute pairing ticket and returns URI + QR text.
   - `IpcRequest::Status`: Returns host node ID, active session count, connection status, authorized keys count, pairing status, and `last_input_unix` timestamp.
   - `IpcRequest::Stop`: Cleanly terminates daemon.
-  - `IpcRequest::AgentEvent { session_id, agent, status }`: Ingests agent telemetry, updates session state in registry, and broadcasts `HostEvent::AgentStatusChanged`.
-  - `IpcRequest::ListDevices`: Returns list of authorized devices with node IDs and pairing timestamps.
+  - `IpcRequest::AgentEvent { session_id, agent, signal }`: Ingests one-shot agent telemetry (`AgentSignal`), updates session state in `AgentTracker`, and broadcasts `HostEvent::SessionUpdated`.
+  - `IpcRequest::AgentStream { session_id, agent }`: Long-lived bidirectional IPC stream for OMP (`IpcStreamIn::Signal` / `IpcStreamIn::Close` from hook to host; `IpcStreamOut::ResolvePlanReview { review_id, choice }` from host to hook).
+  - `IpcRequest::ListDevices` / `IpcRequest::ListDevicesWithSource`: Returns authorized devices with node IDs, pairing timestamps, and trust source.
   - `IpcRequest::RevokeDevice { selector }`: Revokes device from `authorized_keys` and terminates active QUIC connections immediately with `CLOSE_UNAUTHORIZED` (`0x01`).
-- **Responses**: `Ok`, `Error(String)`, `PairTicket`, `Status`, `Devices(Vec<DeviceInfo>)`, `Revoked { node_id, device_name }`.
+  - `IpcRequest::OpenUrl { url, session_id }`, `IpcRequest::AccountStatus`, `IpcRequest::AccountUnlink`.
+- **Responses**: `Ok`, `Error(String)`, `PairTicket`, `Status`, `Devices(Vec<DeviceInfo>)`, `DevicesWithSource(Vec<DeviceInfoWithSource>)`, `Revoked { node_id, device_name }`, `AccountStatus`, `Unlinked`.
 
 ### 4.2 CLI Commands
-- `cawide serve [--workdir <path>] [--command <cmd>] [--local-only] [--no-pair]`: Starts daemon and prints pairing QR code.
+- `cawide serve [--workdir <path>] [--command <cmd>] [--local-only] [--no-pair]`: Starts daemon and prints pairing QR code. Runs `auto_setup_all` only when `config.config_dir` equals the default `config_dir()` so isolated test/dev daemons never overwrite user agent configs.
 - `cawide pair`: Generates and prints a new pairing ticket / QR code from running daemon.
 - `cawide status [--json]`: Prints node ID, active session count, connection status, authorized keys count, and last input timestamp. With `--json`, outputs a single-line machine-readable JSON object.
 - `cawide stop`: Gracefully stops the running daemon.
-- `cawide hook <agent> [--event <name>] [payload]`: Subcommand for agent hook scripts (Claude Code, OpenAI Codex CLI, OMP, OpenCode). Returns in < 5 ms, non-blocking, exits 0.
+- `cawide hook <agent> [--event <name> | --stream] [payload]`: Subcommand for agent hook scripts (Claude Code, OpenAI Codex CLI, OMP, OpenCode). Enforces strict PTY gating: returns immediately unless both `CAWIDE_SESSION_ID` and `CAWIDE_SOCKET` are set (no workdir or default-socket fallback). `--stream` runs the long-lived NDJSON bridge for OMP (`// cawide-telemetry v3`), forwarding `epoch`/`seq`-ordered events over `IpcRequest::AgentStream` and writing `{type: "resolve_plan_review", reviewId, choice}` lines to stdout.
 - `cawide setup <agent> [--remove]`: Atomically configures hooks in agent configuration files (`~/.claude/settings.json`, `~/.codex/config.toml`, `~/.omp/agent/extensions/cawide.js`, `~/.config/opencode/plugins/cawide.js`) with `.cawide-bak` backups.
 - `cawide devices`: Lists all authorized devices (`<name>  <first 12 hex>...  added <YYYY-MM-DD>`).
 - `cawide revoke <selector>`: Revokes device by exact 64-hex key, unique >= 8 hex prefix, or exact device name.
+
+### 4.3 Agent Telemetry, Responding & E2E Push Dispatch
+- **Tracker & OSC 7501 Fallback (`crates/cawide-host/src/agent/tracker.rs`, `map.rs`)**: `AgentTracker` maintains a FIFO `attention_queue: VecDeque<Attention>` keyed by `toolCallId` or `reviewId`, deduplicates signals by `(epoch, seq)`, and preserves open `Plan` prompts across asynchronous `agent_end` aborts. When hook updates are absent or stall during `Thinking`, `TermSignals` OSC 7501 (`working|blocked|done|error|idle`) drives state transitions.
+- **Remote Responding (`crates/cawide-host/src/agent/respond.rs`)**: `RpcRequest::AgentRespond` acquires a per-session mutex, verifies `head.id == prompt_id` (or `prompt_id == 0 && prompt == head.prompt`) before every write/sleep step, sanitizes control characters from text replies, and dispatches agent-specific actions (OMP Approval: `\x11` / `\x1b`; OMP Ask: absolute arrow positioning; OMP Plan: `IpcStreamOut::ResolvePlanReview` over `AgentStream`; TextQuestion/Done/Failed: bracketed paste + `\r`).
+- **E2E Push Encryption & Serial Live Activity Dispatch (`crates/cawide-host/src/push.rs`)**:
+  - When a `PushChannelV2` advertises `PUSH_CAP_E2E_CONTENT` with a 32-byte `content_key`, `PushService` encrypts alert and Live Activity detail JSON using `ChaCha20-Poly1305` with a fresh 12-byte `OsRng` nonce and bound AAD (`cawide-push/1|{host_node_id}|{session_id}|{prompt_id}|{kind}` or `cawide-la/1|{host_node_id}|{session_id}|{prompt_id}|{phase}`), omitting plaintext `host_name` when `enc` is present.
+  - Live Activity updates (`/push/activity`) are serialized per `(channel_id, session_id)` queue with monotonic Unix-second `ts`, tool-step coalescing (at most 1 update per 20 s), and `start_attributes` when `PUSH_CAP_PUSH_TO_START` is set.

@@ -12,11 +12,11 @@ use cawide_protocol::codec::{
 use cawide_protocol::error::ProtocolError;
 use cawide_protocol::pairing::PairingUri;
 use cawide_protocol::types::{
-    AgentState, AgentStatus, ControlMessage, ForgeAccountOp, ForgeAccountReply, ForgeAccountsState,
-    ForgeError, ForgeErrorKind, ForgeRepoOp, ForgeRepoReply, FsChunk, FsEntry, FsReadResult,
-    FsSearchResult, GitError, GitErrorKind, GitOp, GitReply, HostEvent, HostInfo, ListeningPort,
-    PushChannel, RpcFrame, RpcRequest, RpcResponse, SessionSummary, TunnelAck, TunnelFailure,
-    TunnelOpen, VoiceCompileResult,
+    AgentChoice, AgentState, AgentStatus, ControlMessage, ForgeAccountOp, ForgeAccountReply,
+    ForgeAccountsState, ForgeError, ForgeErrorKind, ForgeRepoOp, ForgeRepoReply, FsChunk, FsEntry,
+    FsReadResult, FsSearchResult, GitError, GitErrorKind, GitOp, GitReply, HostEvent, HostInfo,
+    ListeningPort, PushChannel, PushChannelV2, RpcFrame, RpcRequest, RpcResponse, SessionSummary,
+    TunnelAck, TunnelFailure, TunnelOpen, VoiceCompileResult,
 };
 use proptest::prelude::*;
 
@@ -170,6 +170,37 @@ fn arb_rpc_request() -> impl Strategy<Value = RpcRequest> {
                 takeover,
             }
         }),
+        prop::option::of((
+            any::<String>(),
+            any::<String>(),
+            prop::collection::vec(any::<u8>(), 0..=32),
+            any::<u32>(),
+        ))
+        .prop_map(|opt| RpcRequest::SetPushChannelV2 {
+            channel: opt.map(|(channel_id, secret, content_key, caps)| PushChannelV2 {
+                channel_id,
+                secret,
+                content_key,
+                caps,
+            }),
+        }),
+        (
+            any::<String>(),
+            any::<u64>(),
+            any::<String>(),
+            prop_oneof![
+                any::<u32>().prop_map(|index| AgentChoice::Option { index }),
+                any::<String>().prop_map(|text| AgentChoice::Text { text }),
+            ],
+        )
+            .prop_map(|(session_id, prompt_id, prompt, choice)| {
+                RpcRequest::AgentRespond {
+                    session_id,
+                    prompt_id,
+                    prompt,
+                    choice,
+                }
+            }),
     ]
 }
 
@@ -509,6 +540,8 @@ fn arb_rpc_response() -> impl Strategy<Value = RpcResponse> {
             }),
         any::<Result<(), String>>().prop_map(RpcResponse::SetPushChannel),
         any::<Result<Vec<u8>, String>>().prop_map(RpcResponse::AccountClaim),
+        any::<Result<(), String>>().prop_map(RpcResponse::SetPushChannelV2),
+        any::<Result<(), String>>().prop_map(RpcResponse::AgentRespond),
     ]
 }
 

@@ -10,7 +10,6 @@ use crate::net::connections::ConnectionTracker;
 use crate::net::error::NetError;
 use crate::net::registry::SessionRegistry;
 use crate::net::{HANDSHAKE_STEP_TIMEOUT, MAX_IPC_FRAME_SIZE};
-use cawide_protocol::types::AgentStatus;
 use cawide_protocol::{read_length_prefixed, write_length_prefixed};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -18,15 +17,15 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum IpcRequest {
     Pair,
     Status,
     Stop,
     AgentEvent {
-        session_id: Option<String>,
-        workdir: Option<String>,
+        session_id: String,
         agent: String,
-        status: AgentStatus,
+        signal: crate::agent::map::AgentSignal,
     },
     ListDevices,
     RevokeDevice {
@@ -39,6 +38,22 @@ pub enum IpcRequest {
     AccountStatus,
     AccountUnlink,
     ListDevicesWithSource,
+    AgentStream {
+        session_id: String,
+        agent: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum IpcStreamIn {
+    Signal(crate::agent::map::AgentSignal),
+    Close,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum IpcStreamOut {
+    ResolvePlanReview { review_id: String, choice: String },
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum IpcResponse {
@@ -157,6 +172,50 @@ pub struct IpcListener {
 #[cfg(windows)]
 pub struct IpcStream {
     inner: tokio::net::windows::named_pipe::NamedPipeServer,
+}
+
+#[cfg(unix)]
+pub struct IpcClientStream {
+    inner: UnixStream,
+}
+
+#[cfg(windows)]
+pub struct IpcClientStream {
+    inner: tokio::net::windows::named_pipe::NamedPipeClient,
+}
+
+impl tokio::io::AsyncRead for IpcClientStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for IpcClientStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 impl tokio::io::AsyncRead for IpcStream {
@@ -377,18 +436,10 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
         IpcRequest::Stop => (IpcResponse::Ok, true),
         IpcRequest::AgentEvent {
             session_id,
-            workdir,
             agent,
-            status,
+            signal,
         } => (
-            crate::agent::ingest(
-                &ctx.registry,
-                &ctx.broadcaster,
-                session_id.as_deref(),
-                workdir.as_deref(),
-                &agent,
-                status,
-            ),
+            crate::agent::ingest(&ctx.registry, &ctx.broadcaster, &session_id, &agent, signal),
             false,
         ),
         IpcRequest::ListDevices => (crate::devices::list(&ctx.auth_store), false),
@@ -434,6 +485,73 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
         }
         IpcRequest::ListDevicesWithSource => {
             (crate::devices::list_with_source(&ctx.auth_store), false)
+        }
+        IpcRequest::AgentStream { session_id, agent } => {
+            if !crate::agent::map::is_valid_slug(&agent) {
+                tracing::debug!(session = %session_id, agent = %agent, "rejecting agent stream with invalid agent slug");
+                return Ok(());
+            }
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<IpcStreamOut>(16);
+            let Some(stream_id) = ctx.registry.register_agent_stream(&session_id, tx) else {
+                tracing::debug!(session = %session_id, "rejecting agent stream for unknown or dead session");
+                return Ok(());
+            };
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            let mut shutdown_rx = ctx.shutdown_tx.subscribe();
+            let mut writer_shutdown = shutdown_rx.clone();
+            let mut writer_task = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        out_opt = rx.recv() => {
+                            match out_opt {
+                                Some(out_msg) => {
+                                    let res = tokio::time::timeout(HANDSHAKE_STEP_TIMEOUT, async {
+                                        write_length_prefixed(&mut writer, &out_msg, MAX_IPC_FRAME_SIZE).await?;
+                                        writer.flush().await.map_err(cawide_protocol::ProtocolError::Io)
+                                    })
+                                    .await;
+                                    if !matches!(res, Ok(Ok(()))) {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        res = writer_shutdown.changed() => {
+                            if res.is_err() || *writer_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            loop {
+                tokio::select! {
+                    in_res = read_length_prefixed::<_, IpcStreamIn>(&mut reader, MAX_IPC_FRAME_SIZE) => {
+                        match in_res {
+                            Ok(Some(IpcStreamIn::Signal(signal))) => {
+                                let _ = crate::agent::ingest(
+                                    &ctx.registry,
+                                    &ctx.broadcaster,
+                                    &session_id,
+                                    &agent,
+                                    signal,
+                                );
+                            }
+                            Ok(Some(IpcStreamIn::Close)) | Ok(None) | Err(_) => break,
+                        }
+                    }
+                    _ = &mut writer_task => break,
+                    res = shutdown_rx.changed() => {
+                        if res.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+            writer_task.abort();
+            ctx.registry.unregister_agent_stream(&session_id, stream_id);
+            return Ok(());
         }
     };
 
@@ -531,12 +649,9 @@ fn pair_response(ctx: &IpcContext) -> IpcResponse {
     }
 }
 
-pub async fn send_ipc_request(
-    socket_path: &Path,
-    req: &IpcRequest,
-) -> Result<IpcResponse, NetError> {
+pub async fn connect_ipc(socket_path: &Path) -> Result<IpcClientStream, NetError> {
     #[cfg(unix)]
-    let mut stream = match UnixStream::connect(socket_path).await {
+    let inner = match UnixStream::connect(socket_path).await {
         Ok(s) => s,
         Err(e)
             if matches!(
@@ -552,7 +667,7 @@ pub async fn send_ipc_request(
     };
 
     #[cfg(windows)]
-    let mut stream = {
+    let inner = {
         let pipe_name = socket_path.to_string_lossy().into_owned();
         match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe_name) {
             Ok(client) => client,
@@ -560,11 +675,20 @@ pub async fn send_ipc_request(
                 if matches!(e.kind(), std::io::ErrorKind::NotFound)
                     || e.raw_os_error() == Some(2) =>
             {
-                return Err(NetError::DaemonNotRunning(pipe_name.to_string()));
+                return Err(NetError::DaemonNotRunning(pipe_name));
             }
             Err(e) => return Err(NetError::Io(e)),
         }
     };
+
+    Ok(IpcClientStream { inner })
+}
+
+pub async fn send_ipc_request(
+    socket_path: &Path,
+    req: &IpcRequest,
+) -> Result<IpcResponse, NetError> {
+    let mut stream = connect_ipc(socket_path).await?;
     write_length_prefixed(&mut stream, req, MAX_IPC_FRAME_SIZE).await?;
     let resp: Option<IpcResponse> = tokio::time::timeout(
         HANDSHAKE_STEP_TIMEOUT,

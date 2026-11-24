@@ -481,6 +481,10 @@ impl PtySession {
         self.output.lock().signals()
     }
 
+    pub fn osc_seq(&self) -> u64 {
+        self.output.lock().osc_seq()
+    }
+
     pub fn clear_progress(&self) {
         self.output.lock().clear_progress();
     }

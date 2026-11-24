@@ -99,6 +99,15 @@ pub enum RpcRequest {
         account_id: String,
         takeover: bool,
     },
+    SetPushChannelV2 {
+        channel: Option<PushChannelV2>,
+    },
+    AgentRespond {
+        session_id: String,
+        prompt_id: u64,
+        prompt: String,
+        choice: AgentChoice,
+    },
 }
 
 /// Remote procedure call responses returned on stream 0x03.
@@ -129,12 +138,33 @@ pub enum RpcResponse {
     SetPushChannel(Result<(), String>),
     /// `postcard(cawide_account::HostClaimProof)` on success.
     AccountClaim(Result<Vec<u8>, String>),
+    SetPushChannelV2(Result<(), String>),
+    AgentRespond(Result<(), String>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PushChannel {
     pub channel_id: String,
     pub secret: String,
+}
+
+pub const PUSH_CAP_E2E_CONTENT: u32 = 1;
+pub const PUSH_CAP_LIVE_ACTIVITY: u32 = 2;
+pub const PUSH_CAP_ACTIONS: u32 = 4;
+pub const PUSH_CAP_PUSH_TO_START: u32 = 8;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PushChannelV2 {
+    pub channel_id: String,
+    pub secret: String,
+    pub content_key: Vec<u8>,
+    pub caps: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AgentChoice {
+    Option { index: u32 },
+    Text { text: String },
 }
 
 /// Result of voice prompt compilation.

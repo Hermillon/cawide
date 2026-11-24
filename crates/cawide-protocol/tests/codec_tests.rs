@@ -1257,3 +1257,83 @@ async fn test_pty_chunk_encoder_reuse_large_jump_to_max_chunk() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_rpc_push_v2_and_agent_respond_codec_roundtrip() {
+    let reqs = vec![
+        RpcRequest::SetPushChannelV2 {
+            channel: Some(PushChannelV2 {
+                channel_id: "chan-v2".into(),
+                secret: "0123456789abcdef".repeat(4),
+                content_key: vec![0x42; 32],
+                caps: PUSH_CAP_E2E_CONTENT
+                    | PUSH_CAP_LIVE_ACTIVITY
+                    | PUSH_CAP_ACTIONS
+                    | PUSH_CAP_PUSH_TO_START,
+            }),
+        },
+        RpcRequest::SetPushChannelV2 { channel: None },
+        RpcRequest::AgentRespond {
+            session_id: "sess-1".into(),
+            prompt_id: 99,
+            prompt: "Run cargo test?".into(),
+            choice: AgentChoice::Option { index: 0 },
+        },
+        RpcRequest::AgentRespond {
+            session_id: "sess-1".into(),
+            prompt_id: 0,
+            prompt: "Which branch?".into(),
+            choice: AgentChoice::Text {
+                text: "main".into(),
+            },
+        },
+    ];
+
+    let mut req_buf = Vec::new();
+    for (idx, req) in reqs.iter().enumerate() {
+        write_rpc_request_with_caps(&mut req_buf, (idx + 1) as u32, req, RPC_CAP_ZSTD)
+            .await
+            .expect("write_rpc_request_with_caps");
+    }
+    let mut req_cursor = std::io::Cursor::new(req_buf);
+    for (idx, expected) in reqs.into_iter().enumerate() {
+        let (frame, caps) = read_rpc_request_with_caps(&mut req_cursor)
+            .await
+            .expect("read_rpc_request_with_caps")
+            .expect("frame present");
+        assert_eq!(frame.request_id, (idx + 1) as u32);
+        assert_eq!(frame.payload, expected);
+        assert_eq!(caps, RPC_CAP_ZSTD);
+    }
+    assert!(read_rpc_request_with_caps(&mut req_cursor)
+        .await
+        .expect("eof")
+        .is_none());
+
+    let resps = vec![
+        RpcResponse::SetPushChannelV2(Ok(())),
+        RpcResponse::SetPushChannelV2(Err("invalid content key".into())),
+        RpcResponse::AgentRespond(Ok(())),
+        RpcResponse::AgentRespond(Err("prompt no longer open".into())),
+    ];
+
+    let mut resp_buf = Vec::new();
+    for (idx, resp) in resps.iter().enumerate() {
+        write_rpc_response_with_caps(&mut resp_buf, (idx + 10) as u32, resp, RPC_CAP_ZSTD)
+            .await
+            .expect("write_rpc_response_with_caps");
+    }
+    let mut resp_cursor = std::io::Cursor::new(resp_buf);
+    for (idx, expected) in resps.into_iter().enumerate() {
+        let frame = read_rpc_response(&mut resp_cursor)
+            .await
+            .expect("read_rpc_response")
+            .expect("frame present");
+        assert_eq!(frame.request_id, (idx + 10) as u32);
+        assert_eq!(frame.payload, expected);
+    }
+    assert!(read_rpc_response(&mut resp_cursor)
+        .await
+        .expect("eof")
+        .is_none());
+}

@@ -128,10 +128,12 @@ impl CawideServer {
         let broadcaster = Arc::new(HostEventBroadcaster::new(HOST_EVENT_CAPACITY));
         let bin_dir = crate::net::shims::ensure_shims(&config.config_dir)
             .map_err(|e| NetError::Shims(e.to_string()))?;
-        if let Some(home) = std::env::var_os("HOME") {
-            let home_path = PathBuf::from(home);
-            let exe_path = bin_dir.join("cawide");
-            let _ = crate::agent::setup::auto_setup_all(&home_path, &exe_path);
+        if crate::net::config_dir().is_ok_and(|d| d == config.config_dir) {
+            if let Some(home) = std::env::var_os("HOME") {
+                let home_path = PathBuf::from(home);
+                let exe_path = bin_dir.join("cawide");
+                let _ = crate::agent::setup::auto_setup_all(&home_path, &exe_path);
+            }
         }
         let cawide_open_path = bin_dir.join("cawide-open").display().to_string();
         let current_path = std::env::var_os("PATH").unwrap_or_default();
@@ -165,6 +167,7 @@ impl CawideServer {
             ("NPM_CONFIG_BROWSER".to_string(), cawide_open_path),
         ];
         let (alert_tx, alert_rx) = tokio::sync::mpsc::channel(64);
+        let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(128);
         let registry = Arc::new(
             SessionRegistry::new(
                 canonical_workdir.clone(),
@@ -173,7 +176,8 @@ impl CawideServer {
                 Arc::clone(&broadcaster),
             )
             .with_config_dir(config.config_dir.clone())
-            .with_alert_sender(alert_tx),
+            .with_alert_sender(alert_tx)
+            .with_activity_sender(activity_tx),
         );
         let watchers = if config.watch_workspace {
             Some(RootWatchers::new(
@@ -286,6 +290,7 @@ impl CawideServer {
         let push =
             crate::push::PushService::open(&config.config_dir, Arc::clone(&auth_store), node_id);
         push.spawn_dispatcher(alert_rx);
+        push.spawn_activity_dispatcher(activity_rx);
         let git_host_env = Arc::new(crate::rpc::git::env::GitHostEnv::new(config.git_env));
         let forge_service = Arc::new(crate::forge::ForgeService::new(
             config.config_dir.clone(),

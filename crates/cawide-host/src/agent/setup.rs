@@ -26,7 +26,7 @@ const CODEX_EVENTS: &[&str] = &[
 ];
 
 const TELEMETRY_MARKER: &str = "// cawide-telemetry";
-const TELEMETRY_MARKER_V2: &str = "// cawide-telemetry v2";
+const TELEMETRY_MARKER_V3: &str = "// cawide-telemetry v3";
 fn backup_file_if_exists(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
         let bak = PathBuf::from(format!("{}.cawide-bak", path.display()));
@@ -332,70 +332,273 @@ fn setup_omp(home: &Path, abs_exe: &Path, remove: bool) -> anyhow::Result<String
     let path = home.join(".omp/agent/extensions/cawide.js");
     let exe_js = serde_json::to_string(&abs_exe.display().to_string())?;
     let content = format!(
-        "{TELEMETRY_MARKER_V2}\n\
+        "{TELEMETRY_MARKER_V3}\n\
 export default function (pi) {{\n  \
-const isMain = (ctx) => {{\n    \
-if (ctx?.agent?.kind === \"sub\") return false;\n    \
-const id = ctx?.agent?.id || ctx?.session?.id || \"root\";\n    \
-if (!globalThis.__cawideOmpOwnership) {{\n      \
-globalThis.__cawideOmpOwnership = id;\n    \
-}}\n    \
-return globalThis.__cawideOmpOwnership === id;\n  \
+if (!process.env.CAWIDE_SESSION_ID || !process.env.CAWIDE_SOCKET) return;\n  \
+const binName = process.platform === \"win32\" ? \"cawide.exe\" : \"cawide\";\n  \
+const bin = process.env.CAWIDE_BIN_DIR ? `${{process.env.CAWIDE_BIN_DIR}}/${{binName}}` : {exe_js};\n  \
+const clip = (s, n) => {{\n    \
+if (typeof s !== \"string\") return undefined;\n    \
+const clean = typeof s.toWellFormed === \"function\" ? s.toWellFormed() : s;\n    \
+if (clean.length <= n) return clean;\n    \
+let end = n;\n    \
+const code = clean.charCodeAt(end - 1);\n    \
+if (code >= 0xd800 && code <= 0xdbff) end -= 1;\n    \
+return clean.slice(0, end);\n  \
 }};\n  \
-const send = (event, payload) => {{\n    \
+const clipTail = (s, n) => {{\n    \
+if (typeof s !== \"string\") return \"\";\n    \
+const clean = typeof s.toWellFormed === \"function\" ? s.toWellFormed() : s;\n    \
+if (clean.length <= n) return clean;\n    \
+let start = clean.length - n;\n    \
+const code = clean.charCodeAt(start);\n    \
+if (code >= 0xdc00 && code <= 0xdfff) start += 1;\n    \
+return clean.slice(start);\n  \
+}};\n  \
+const pendingTools = new Map();\n  \
+let lastCtx = null;\n  \
+let currentProc = null;\n  \
+let shuttingDown = false;\n  \
+let queue = Promise.resolve();\n  \
+const readStdout = async (proc, stream) => {{\n    \
+if (!stream) return;\n    \
+const decoder = new TextDecoder();\n    \
+let buf = \"\";\n    \
+const handleLine = (line) => {{\n      \
+const trimmed = line.trim();\n      \
+if (!trimmed) return;\n      \
+try {{\n        \
+const msg = JSON.parse(trimmed);\n        \
+if (msg?.type === \"resolve_plan_review\" && typeof msg.reviewId === \"string\" && typeof msg.choice === \"string\") {{\n          \
+lastCtx?.resolvePlanReview?.(msg.reviewId, msg.choice);\n        \
+}}\n      \
+}} catch {{}}\n    \
+}};\n    \
 try {{\n      \
-const data = {{ ...(payload ?? {{}}), cwd: process.cwd() }};\n      \
-const body = JSON.stringify(data);\n      \
-if (globalThis.Bun?.spawn) {{\n        \
-globalThis.Bun.spawn([{exe_js}, \"hook\", \"omp\", \"--event\", event, body], {{ stdout: \"ignore\", stderr: \"ignore\" }});\n      \
+if (typeof stream.getReader === \"function\") {{\n        \
+const reader = stream.getReader();\n        \
+while (true) {{\n          \
+const {{ value, done }} = await reader.read();\n          \
+if (done) break;\n          \
+buf += decoder.decode(value, {{ stream: true }});\n          \
+let idx;\n          \
+while ((idx = buf.indexOf(\"\\n\")) !== -1) {{\n            \
+handleLine(buf.slice(0, idx));\n            \
+buf = buf.slice(idx + 1);\n          \
+}}\n        \
+}}\n      \
 }} else {{\n        \
-import(\"node:child_process\").then(({{ spawn }}) => {{\n          \
-const child = spawn({exe_js}, [\"hook\", \"omp\", \"--event\", event, body], {{ stdio: \"ignore\", detached: true }});\n          \
-child.unref();\n        \
-}}).catch(() => {{}});\n      \
-}}\n    \
+for await (const chunk of stream) {{\n          \
+buf += typeof chunk === \"string\" ? chunk : decoder.decode(chunk, {{ stream: true }});\n          \
+let idx;\n          \
+while ((idx = buf.indexOf(\"\\n\")) !== -1) {{\n            \
+handleLine(buf.slice(0, idx));\n            \
+buf = buf.slice(idx + 1);\n          \
+}}\n        \
+}}\n      \
+}}\n      \
+buf += decoder.decode();\n      \
+if (buf) handleLine(buf);\n    \
 }} catch {{}}\n  \
 }};\n  \
+const spawnHook = async () => {{\n    \
+const epoch = ((Math.random() * 0xffffffff) >>> 0) ^ (process.pid >>> 0);\n    \
+let proc = null;\n    \
+if (globalThis.Bun?.spawn) {{\n      \
+const child = globalThis.Bun.spawn([bin, \"hook\", \"omp\", \"--stream\"], {{\n        \
+stdin: \"pipe\",\n        \
+stdout: \"pipe\",\n        \
+stderr: \"ignore\",\n      }});\n      \
+let exited = false;\n      \
+const exitedPromise = child.exited.then(() => {{ exited = true; }}, () => {{ exited = true; }});\n      \
+proc = {{\n        \
+epoch,\n        \
+seq: 0,\n        \
+isExited: () => exited,\n        \
+exited: exitedPromise,\n        \
+writeLine: async (line) => {{\n          \
+await child.stdin.write(line);\n          \
+await child.stdin.flush?.();\n        \
+}},\n        \
+endStdin: async () => {{ await child.stdin.end(); }},\n        \
+kill: () => {{ try {{ child.kill(); }} catch {{}} }},\n      }};\n      \
+readStdout(proc, child.stdout);\n    \
+}} else {{\n      \
+const {{ spawn }} = await import(\"node:child_process\");\n      \
+const child = spawn(bin, [\"hook\", \"omp\", \"--stream\"], {{ stdio: [\"pipe\", \"pipe\", \"ignore\"] }});\n      \
+let exited = false;\n      \
+const exitedPromise = new Promise((resolve) => {{\n        \
+const done = () => {{ exited = true; resolve(); }};\n        \
+child.once(\"exit\", done);\n        \
+child.once(\"error\", done);\n      }});\n      \
+proc = {{\n        \
+epoch,\n        \
+seq: 0,\n        \
+isExited: () => exited,\n        \
+exited: exitedPromise,\n        \
+writeLine: (line) => new Promise((resolve, reject) => {{\n          \
+child.stdin.write(line, (err) => (err ? reject(err) : resolve()));\n        }}),\n        \
+endStdin: () => new Promise((resolve) => {{ child.stdin.end(resolve); }}),\n        \
+kill: () => {{ try {{ child.kill(); }} catch {{}} }},\n      }};\n      \
+readStdout(proc, child.stdout);\n    \
+}}\n    \
+proc.exited.then(() => {{ if (currentProc === proc) currentProc = null; }});\n    \
+return proc;\n  \
+}};\n  \
+  const enqueue = (event, payload, force = false) => {{\n    \
+if (shuttingDown && !force) return;\n    \
+queue = queue.then(async () => {{\n      \
+if (!currentProc || currentProc.isExited()) {{\n          \
+currentProc = await spawnHook();\n        \
+}}\n        \
+const p = currentProc;\n        \
+p.seq += 1;\n        \
+const line = JSON.stringify({{\n          \
+event,\n          \
+epoch: p.epoch,\n          \
+seq: p.seq,\n          \
+ts: Math.floor(Date.now() / 1000),\n          \
+payload: payload ?? {{}},\n        }}) + \"\\n\";\n        \
+await p.writeLine(line);\n      \
+}} catch {{\n        \
+if (currentProc) {{\n          \
+currentProc.kill();\n          \
+currentProc = null;\n        \
+}}\n      \
+}}\n    \
+}});\n  \
+}};\n  \
+const isMain = (ctx) => {{\n    \
+if (ctx?.agent?.kind === \"sub\") return false;\n    \
+lastCtx = ctx;\n    \
+return true;\n  \
+}};\n  \
 pi.on(\"before_agent_start\", (e, ctx) => {{\n    \
-if (isMain(ctx)) send(\"before_agent_start\", {{ prompt: e?.prompt }});\n  \
+if (!isMain(ctx)) return;\n    \
+    const prompt = clip(e?.prompt, 2000) ?? \"\";\n    \
+enqueue(\"before_agent_start\", {{ prompt }});\n  \
 }});\n  \
 pi.on(\"agent_start\", (_e, ctx) => {{\n    \
-if (isMain(ctx)) send(\"agent_start\");\n  \
+if (isMain(ctx)) enqueue(\"agent_start\", {{}});\n  \
 }});\n  \
 pi.on(\"tool_call\", (e, ctx) => {{\n    \
 if (!isMain(ctx)) return;\n    \
-const q = e.toolName === \"ask\" ? (e.input?.questions?.[0] ?? {{}}) : {{}};\n    \
-send(\"tool_call\", {{\n      \
-toolName: e.toolName,\n      \
-question: q.question,\n      \
-options: (q.options ?? []).map(o => o.label || o),\n      \
-command: e.input?.command || e.input?.cmd,\n      \
-path: e.input?.path || e.input?.file_path,\n    \
-}});\n  \
+const toolName = e?.toolName;\n    \
+const toolCallId = e?.toolCallId;\n    \
+const cmd = e?.input?.command || e?.input?.cmd;\n    \
+const path = e?.input?.path || e?.input?.file_path;\n    \
+    const shortCmd = clip(cmd, 200);\n    \
+const shortPath = clip(path, 200);\n    \
+if (toolCallId) {{\n      \
+if (pendingTools.size >= 128) {{\n        \
+const firstKey = pendingTools.keys().next().value;\n        \
+if (firstKey !== undefined) pendingTools.delete(firstKey);\n      \
+}}\n      \
+pendingTools.set(toolCallId, {{ command: shortCmd, path: shortPath }});\n    \
+}}\n    \
+if (toolName === \"ask\") {{\n      \
+const questions = Array.isArray(e?.input?.questions) ? e.input.questions : null;\n      \
+const q = questions?.[0] ?? e?.input ?? {{}};\n      \
+const questionsLength = questions ? questions.length : (q.question ? 1 : 0);\n      \
+enqueue(\"tool_call\", {{\n        \
+toolName,\n        \
+toolCallId,\n        \
+questionsLength,\n        \
+question: q.question,\n        \
+options: (q.options ?? []).map((o) => (typeof o === \"string\" ? o : (o?.label ?? \"\"))),\n        \
+multi: Boolean(q.multi),\n        \
+recommended: typeof q.recommended === \"number\" ? q.recommended : undefined,\n      }});\n    \
+}} else {{\n      \
+enqueue(\"tool_call\", {{\n        \
+toolName,\n        \
+toolCallId,\n        \
+command: shortCmd,\n        \
+path: shortPath,\n      }});\n    \
+}}\n  \
 }});\n  \
 pi.on(\"tool_approval_requested\", (e, ctx) => {{\n    \
 if (!isMain(ctx)) return;\n    \
-send(\"tool_approval_requested\", {{ reason: e?.reason, tool: e?.toolName || e?.tool }});\n  \
+const toolCallId = e?.toolCallId;\n    \
+const cached = toolCallId ? pendingTools.get(toolCallId) : undefined;\n    \
+const cmd = e?.command || e?.input?.command || cached?.command;\n    \
+const path = e?.path || e?.input?.path || e?.input?.file_path || cached?.path;\n    \
+enqueue(\"tool_approval_requested\", {{\n      \
+toolName: e?.toolName || e?.tool,\n      \
+toolCallId,\n      \
+reason: e?.reason,\n      \
+      command: clip(cmd, 200),\n      \
+path: clip(path, 200),\n    \
 }});\n  \
-pi.on(\"tool_approval_resolved\", (_e, ctx) => {{\n    \
-if (isMain(ctx)) send(\"tool_approval_resolved\");\n  \
+pi.on(\"tool_approval_resolved\", (e, ctx) => {{\n    \
+if (!isMain(ctx)) return;\n    \
+enqueue(\"tool_approval_resolved\", {{ approved: e?.approved, toolCallId: e?.toolCallId }});\n  \
 }});\n  \
-pi.on(\"tool_result\", (_e, ctx) => {{\n    \
-if (isMain(ctx)) send(\"tool_result\");\n  \
+pi.on(\"tool_result\", (e, ctx) => {{\n    \
+if (!isMain(ctx)) return;\n    \
+if (e?.toolCallId) pendingTools.delete(e.toolCallId);\n    \
+enqueue(\"tool_result\", {{\n      \
+toolName: e?.toolName,\n      \
+toolCallId: e?.toolCallId,\n      \
+isError: Boolean(e?.isError),\n    }});\n  \
+}});\n  \
+pi.on(\"plan_review_requested\", (e, ctx) => {{\n    \
+if (!isMain(ctx)) return;\n    \
+const options = (e?.options ?? [])\n      \
+.filter((o) => o && !o.disabled && o.id !== \"refine\" && o.id !== \"save\")\n      \
+.map((o) => ({{ id: o.id, label: o.label }}));\n    \
+enqueue(\"plan_review_requested\", {{\n      \
+reviewId: e?.reviewId,\n      \
+title: e?.title,\n      \
+options,\n    }});\n  \
+}});\n  \
+pi.on(\"plan_review_resolved\", (e, ctx) => {{\n    \
+if (!isMain(ctx)) return;\n    \
+enqueue(\"plan_review_resolved\", {{ reviewId: e?.reviewId, choice: e?.choice }});\n  \
 }});\n  \
 pi.on(\"agent_end\", (e, ctx) => {{\n    \
-if (isMain(ctx)) {{\n      \
-send(\"agent_end\", {{ willContinue: e?.willContinue, summary: e?.summary }});\n      \
-if (!e?.willContinue) {{\n        \
-globalThis.__cawideOmpOwnership = null;\n      \
+if (!isMain(ctx)) return;\n    \
+const msgs = Array.isArray(e?.messages) ? e.messages : [];\n    \
+let lastAsst = null;\n    \
+for (let i = msgs.length - 1; i >= 0; i--) {{\n      \
+if (msgs[i]?.role === \"assistant\") {{ lastAsst = msgs[i]; break; }}\n    \
 }}\n    \
-}}\n  \
+const stopReason = lastAsst?.stopReason ?? e?.stopReason;\n    \
+const errorMessage = lastAsst?.errorMessage ?? e?.errorMessage;\n    \
+let fullText = \"\";\n    \
+if (typeof lastAsst?.content === \"string\") {{\n      \
+fullText = lastAsst.content;\n    \
+}} else if (Array.isArray(lastAsst?.content)) {{\n      \
+fullText = lastAsst.content\n        \
+.filter((b) => b?.type === \"text\" && typeof b.text === \"string\")\n        \
+.map((b) => b.text)\n        \
+.join(\"\\n\");\n    \
+}} else if (typeof e?.summary === \"string\") {{\n      \
+fullText = e.summary;\n    \
+}}\n    \
+    const finalTextHead = clip(fullText, 500) ?? \"\";\n    \
+const finalTextTail = clipTail(fullText, 4000);\n    \
+enqueue(\"agent_end\", {{\n      \
+awaitingAsyncWork: Boolean(e?.awaitingAsyncWork),\n      \
+willContinue: Boolean(e?.willContinue),\n      \
+stopReason,\n      \
+errorMessage,\n      \
+finalTextHead,\n      \
+finalTextTail,\n    }});\n  \
 }});\n  \
-pi.on(\"session_shutdown\", (_e, ctx) => {{\n    \
-if (isMain(ctx)) {{\n      \
-send(\"session_shutdown\");\n      \
-globalThis.__cawideOmpOwnership = null;\n    \
-}}\n  \
+  pi.on(\"session_shutdown\", async (_e, ctx) => {{\n    \
+if (!isMain(ctx)) return;\n    \
+shuttingDown = true;\n    \
+enqueue(\"session_shutdown\", {{}}, true);\n    \
+await queue.catch(() => {{}});\n    \
+const p = currentProc;\n    \
+if (!p) return;\n    \
+try {{ await p.endStdin(); }} catch {{}}\n    \
+await Promise.race([\n      \
+p.exited,\n      \
+new Promise((resolve) => setTimeout(resolve, 1500)),\n    \
+]);\n    \
+if (!p.isExited()) p.kill();\n    \
+if (currentProc === p) currentProc = null;\n  \
 }});\n\
 }}\n"
     );
@@ -407,11 +610,14 @@ fn setup_opencode(home: &Path, abs_exe: &Path, remove: bool) -> anyhow::Result<S
     let path = home.join(".config/opencode/plugins/cawide.js");
     let exe_js = serde_json::to_string(&abs_exe.display().to_string())?;
     let content = format!(
-        "{TELEMETRY_MARKER_V2}\n\
+        "{TELEMETRY_MARKER_V3}\n\
 export default {{\n  \
 id: \"cawide\",\n  \
 async setup(context) {{\n    \
+if (!process.env.CAWIDE_SESSION_ID || !process.env.CAWIDE_SOCKET) return;\n    \
 if (!context?.event?.subscribe) return;\n    \
+    const binName = process.platform === \"win32\" ? \"cawide.exe\" : \"cawide\";\n    \
+const bin = process.env.CAWIDE_BIN_DIR ? `${{process.env.CAWIDE_BIN_DIR}}/${{binName}}` : {exe_js};\n    \
 let spawn = globalThis.Bun?.spawn;\n    \
 if (!spawn) {{\n      \
 try {{\n        \
@@ -431,10 +637,9 @@ if (!event || !event.type) continue;\n        \
 const directory = event.location?.directory || process.cwd();\n        \
 const payload = {{\n          \
 ...(event.data ?? event.properties ?? {{}}),\n          \
-directory,\n        \
-}};\n        \
+directory,\n        }};\n        \
 try {{\n          \
-spawn([{exe_js}, \"hook\", \"opencode\", \"--event\", event.type, JSON.stringify(payload)], {{ stdout: \"ignore\", stderr: \"ignore\" }});\n        \
+spawn([bin, \"hook\", \"opencode\", \"--event\", event.type, JSON.stringify(payload)], {{ stdout: \"ignore\", stderr: \"ignore\" }});\n        \
 }} catch {{}}\n      \
 }}\n    \
 }} catch {{}}\n  \

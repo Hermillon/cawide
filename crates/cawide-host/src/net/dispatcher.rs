@@ -1012,5 +1012,23 @@ async fn dispatch_rpc(
                 .unwrap_or_else(|e| Err(format!("claim task failed: {e}"))),
             )
         }
+        RpcRequest::SetPushChannelV2 { channel } => {
+            RpcResponse::SetPushChannelV2(push.set_channel_v2(client_node_id, channel).await)
+        }
+        RpcRequest::AgentRespond {
+            session_id,
+            prompt_id,
+            prompt,
+            choice,
+        } => RpcResponse::AgentRespond(
+            crate::agent::respond::respond_to_session(
+                registry,
+                &session_id,
+                prompt_id,
+                &prompt,
+                choice,
+            )
+            .await,
+        ),
     }
 }
