@@ -8,10 +8,7 @@ use std::time::{Duration, Instant};
 
 use cawide_host::agent::setup::run_setup;
 use cawide_host::net::{CawideServer, CawideServerConfig, NetworkMode};
-use cawide_protocol::types::{
-    AgentChoice, AgentStatus, HostEvent, PushChannelV2, RpcFrame, RpcRequest, RpcResponse,
-    PUSH_CAP_E2E_CONTENT,
-};
+use cawide_protocol::types::{AgentStatus, HostEvent, RpcFrame, RpcRequest, RpcResponse};
 use cawide_protocol::{
     read_control_message, read_pty_attach_ack, read_rpc_response, write_control_message,
     write_pty_attach_header, write_rpc_request, ControlMessage, PtyAttachAck, PtyAttachHeader,
@@ -634,6 +631,7 @@ async fn test_cli_hook_omp_stream_e2e() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rpc_set_push_channel_v2_and_agent_respond_e2e() {
+    use cawide_protocol::types::{AgentChoice, PushChannelV2, PUSH_CAP_E2E_CONTENT};
     use std::io::Write;
 
     let tmp = tempfile::tempdir().unwrap();
