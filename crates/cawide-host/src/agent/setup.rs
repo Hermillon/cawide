@@ -448,6 +448,7 @@ return proc;\n  \
   const enqueue = (event, payload, force = false) => {{\n    \
 if (shuttingDown && !force) return;\n    \
 queue = queue.then(async () => {{\n      \
+try {{\n        \
 if (!currentProc || currentProc.isExited()) {{\n          \
 currentProc = await spawnHook();\n        \
 }}\n        \
@@ -526,8 +527,9 @@ enqueue(\"tool_approval_requested\", {{\n      \
 toolName: e?.toolName || e?.tool,\n      \
 toolCallId,\n      \
 reason: e?.reason,\n      \
-      command: clip(cmd, 200),\n      \
+command: clip(cmd, 200),\n      \
 path: clip(path, 200),\n    \
+}});\n  \
 }});\n  \
 pi.on(\"tool_approval_resolved\", (e, ctx) => {{\n    \
 if (!isMain(ctx)) return;\n    \

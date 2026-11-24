@@ -159,6 +159,28 @@ fn test_setup_omp_refuses_non_marker_and_opencode() {
     assert!(omp_content.contains("\"--stream\""));
     assert!(omp_content.contains("plan_review_requested"));
     assert!(omp_content.contains("resolvePlanReview"));
+    assert!(
+        omp_content.contains("    });\n  });\n  pi.on(\"tool_approval_resolved\""),
+        "tool_approval_requested handler must close before tool_approval_resolved"
+    );
+    if let Ok(mut child) = Command::new("node")
+        .args(["--input-type=module", "--check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(omp_content.as_bytes());
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "generated omp extension JS must parse cleanly: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     // OpenCode setup
     let opencode_summary = run_setup(home, &exe, "opencode", false).unwrap();
     assert!(!opencode_summary.is_empty());
@@ -168,6 +190,24 @@ fn test_setup_omp_refuses_non_marker_and_opencode() {
     assert!(opencode_content.starts_with("// cawide-telemetry v3"));
     assert!(opencode_content.contains("CAWIDE_SESSION_ID"));
     assert!(opencode_content.contains("CAWIDE_SOCKET"));
+    if let Ok(mut child) = Command::new("node")
+        .args(["--input-type=module", "--check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(opencode_content.as_bytes());
+        }
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "generated opencode plugin JS must parse cleanly: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
