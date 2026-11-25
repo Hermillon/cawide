@@ -471,6 +471,7 @@ currentProc = null;\n        \
 }};\n  \
 const isMain = (ctx) => {{\n    \
 if (ctx?.agent?.kind === \"sub\") return false;\n    \
+if (ctx?.hasUI === false) return false;\n    \
 lastCtx = ctx;\n    \
 return true;\n  \
 }};\n  \
@@ -542,6 +543,17 @@ enqueue(\"tool_result\", {{\n      \
 toolName: e?.toolName,\n      \
 toolCallId: e?.toolCallId,\n      \
 isError: Boolean(e?.isError),\n    }});\n  \
+}});\n  \
+pi.on(\"tool_execution_end\", (e, ctx) => {{\n    \
+if (!isMain(ctx)) return;\n    \
+const toolCallId = e?.toolCallId;\n    \
+if (toolCallId && pendingTools.has(toolCallId)) {{\n      \
+pendingTools.delete(toolCallId);\n      \
+enqueue(\"tool_result\", {{\n        \
+toolName: e?.toolName,\n        \
+toolCallId,\n        \
+isError: Boolean(e?.isError),\n      }});\n    \
+}}\n  \
 }});\n  \
 pi.on(\"plan_review_requested\", (e, ctx) => {{\n    \
 if (!isMain(ctx)) return;\n    \

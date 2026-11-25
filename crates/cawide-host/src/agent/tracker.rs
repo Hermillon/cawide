@@ -426,7 +426,7 @@ impl AgentTracker {
         match &signal.outcome {
             TurnOutcome::Started => {
                 t.attention_queue
-                    .retain(|a| !matches!(a.kind, AttentionKind::TextQuestion));
+                    .retain(|a| matches!(a.kind, AttentionKind::Plan { .. }));
                 t.turn_started_at.get_or_insert(now_secs);
                 t.pending_outcome = TurnOutcome::Started;
             }
@@ -833,7 +833,7 @@ fn apply_osc_status(
             TurnOutcome::Started
         }
         OscStatusKind::Blocked { kind } if !terminal_only => {
-            let att_kind = if kind.as_deref() == Some("approval") {
+            let att_kind = if matches!(kind.as_deref(), Some("approval" | "permission")) {
                 AttentionKind::Approval
             } else {
                 AttentionKind::TextQuestion
@@ -1765,5 +1765,79 @@ mod tests {
         assert_eq!(act_shell_done.event, ActivityEventKind::End);
         assert_eq!(act_shell_done.phase, ActivityPhase::Done);
         assert!(act_shell_done.dismiss_immediately);
+    }
+
+    #[test]
+    fn test_stale_ask_cleared_on_turn_started_and_osc_permission_maps_to_approval() {
+        let mut tracker = AgentTracker::default();
+        let ask_sig = AgentSignal {
+            status: AgentStatus::WaitingForInput {
+                prompt: "Pick one".into(),
+                options: vec!["A".into(), "B".into()],
+            },
+            attention: Some(AttentionSpec {
+                key: Some("tc-ask".into()),
+                kind: AttentionKind::Ask {
+                    multi: false,
+                    initial: 0,
+                },
+                prompt: "Pick one".into(),
+                options: vec!["A".into(), "B".into()],
+                actionable: true,
+            }),
+            outcome: TurnOutcome::None,
+            resolution: SignalResolution::None,
+            seq: Some(1),
+            epoch: Some(1),
+        };
+        assert!(
+            tracker
+                .on_hook_signal("omp", ask_sig, 100, 100_000, 0)
+                .changed
+        );
+        assert!(matches!(
+            tracker.head_attention().map(|a| &a.kind),
+            Some(AttentionKind::Ask { .. })
+        ));
+
+        let start_sig = AgentSignal {
+            status: AgentStatus::Thinking {
+                task_desc: "next turn".into(),
+            },
+            attention: None,
+            outcome: TurnOutcome::Started,
+            resolution: SignalResolution::None,
+            seq: Some(2),
+            epoch: Some(1),
+        };
+        let res = tracker.on_hook_signal("omp", start_sig, 101, 101_000, 0);
+        assert!(res.changed);
+        assert!(tracker.head_attention().is_none());
+        assert_eq!(
+            tracker.current().unwrap().status,
+            AgentStatus::Thinking {
+                task_desc: "next turn".into()
+            }
+        );
+
+        let mut osc_tracker = AgentTracker::default();
+        let perm_sig = TerminalSignals {
+            title: None,
+            progress_active: false,
+            run_status: Some(crate::pty::output::OscRunStatus {
+                kind: OscStatusKind::Blocked {
+                    kind: Some("permission".into()),
+                },
+                message: Some("Allow bash?".into()),
+                seq: 1,
+            }),
+        };
+        let osc_res =
+            osc_tracker.on_probe_signals(Some(Foreground::Agent("omp")), &perm_sig, 200, 200_000);
+        assert!(osc_res.changed);
+        assert_eq!(osc_res.alert.unwrap().kind, AgentAlertKind::NeedsApproval);
+        let head = osc_tracker.head_attention().unwrap();
+        assert_eq!(head.kind, AttentionKind::Approval);
+        assert_eq!(head.options, vec!["Allow".to_string(), "Deny".to_string()]);
     }
 }
