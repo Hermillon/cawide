@@ -769,6 +769,7 @@ async fn handle_pty_stream(
             mode_check_in.notify_one();
             registry.touch(&id);
             registry.mark_input();
+            registry.maybe_schedule_claude_anchor_check(&id, &buf[..n]);
         }
         Ok::<(), BoxError>(())
     };

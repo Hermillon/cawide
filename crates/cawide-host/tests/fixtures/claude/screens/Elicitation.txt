@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.332
+▝▜██████▀  v-L · API Usage Billing
+ ▝▝   ▝▝   /private/tmp/cc-w2-DQ6UiH
+
+⚠ Model "v-L" isn't recognized · context assumed to be 1m tokens · update Claude Code, or see the docs
+  ⎿  SessionStart:startup hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+❯ Use the w2demo elicit_name MCP tool and reply with its output.
+  ⎿  UserPromptSubmit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+  Thinking for 4s, calling w2demo…
+  ⎿  Discrepancy detected in tool naming conventions between underscore variations. Verifying the exact identifier
+     required to successfully execute the elicitation function without triggering schema errors.
+  ⎿  PreToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+     Exit 127, likely a missing program: The check may not have run. See /hooks.
+  ⎿  PostToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  MCP server “w2demo” requests your input
+
+  Please enter your name
+
+  ❯ * name: Type something…
+        Your name
+
+    Accept    Decline
+
+  Esc to cancel · ↑/↓ to navigate · Backspace to unset

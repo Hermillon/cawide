@@ -1,0 +1,22 @@
+{
+  "session_id": "f1a7e386-f401-4f89-89c6-ea3018959e78",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/f1a7e386-f401-4f89-89c6-ea3018959e78.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "66ec070d-d37a-4097-8b4f-ff9f5cef4b03",
+  "hook_event_name": "Elicitation",
+  "mcp_server_name": "w2demo",
+  "message": "Please enter your name",
+  "mode": "form",
+  "requested_schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Your name"
+      }
+    },
+    "required": [
+      "name"
+    ]
+  }
+}

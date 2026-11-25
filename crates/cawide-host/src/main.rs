@@ -244,6 +244,10 @@ fn main() -> Result<()> {
         {
             if *stream {
                 rt.block_on(cawide_host::agent::hook::run_hook_stream(agent));
+            } else if agent == "claude" {
+                rt.block_on(cawide_host::agent::claude::run_claude_hook(
+                    event.as_deref(),
+                ));
             } else {
                 rt.block_on(cawide_host::agent::hook::run_hook(
                     agent,

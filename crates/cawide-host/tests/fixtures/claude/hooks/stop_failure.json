@@ -1,0 +1,12 @@
+{
+  "session_id": "aaecee81-c21c-41bc-855f-93a535cf4fb0",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/aaecee81-c21c-41bc-855f-93a535cf4fb0.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "1c1a126a-eb84-4f12-9699-0631c8284d8f",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "StopFailure",
+  "error": "unknown",
+  "last_assistant_message": "API Error: 400 synthetic bad request for StopFailure"
+}

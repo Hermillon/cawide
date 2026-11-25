@@ -137,8 +137,32 @@ impl CawideServer {
         }
         let cawide_open_path = bin_dir.join("cawide-open").display().to_string();
         let current_path = std::env::var_os("PATH").unwrap_or_default();
+        let identity_vars: Vec<(String, std::ffi::OsString)> = std::env::vars_os()
+            .filter_map(|(k, v)| {
+                let ks = k.into_string().ok()?;
+                crate::pty::session::is_inherited_terminal_identity(&ks).then_some((ks, v))
+            })
+            .collect();
+        let home = std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from);
+        let tmpdir = std::env::var_os("TMPDIR")
+            .filter(|t| !t.is_empty())
+            .map(PathBuf::from);
+        let sanitized_path = sanitize_inherited_path(
+            &current_path,
+            identity_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_os_str())),
+            home.as_deref(),
+            tmpdir.as_deref(),
+            &bin_dir,
+        );
         let mut paths = vec![bin_dir.clone()];
-        paths.extend(std::env::split_paths(&current_path));
+        paths.extend(
+            std::env::split_paths(&sanitized_path)
+                .filter(|p| !p.as_os_str().is_empty() && p != &bin_dir),
+        );
         let prepended_path = std::env::join_paths(paths)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| {
@@ -146,13 +170,13 @@ impl CawideServer {
                 const SEP: &str = ";";
                 #[cfg(not(windows))]
                 const SEP: &str = ":";
-                if current_path.is_empty() {
+                if sanitized_path.is_empty() {
                     bin_dir.display().to_string()
                 } else {
                     format!(
                         "{}{SEP}{}",
                         bin_dir.display(),
-                        current_path.to_string_lossy()
+                        sanitized_path.to_string_lossy()
                     )
                 }
             });
@@ -439,5 +463,280 @@ impl CawideServer {
             Err(e) => tracing::warn!(error = %e, "failed to remove ipc socket"),
         }
         Ok(())
+    }
+}
+
+struct NormalizedPath {
+    raw: PathBuf,
+    resolved: PathBuf,
+}
+
+impl NormalizedPath {
+    fn new(path: &Path) -> Self {
+        Self {
+            raw: path.components().collect(),
+            resolved: resolve_path(path),
+        }
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.raw == other.raw || self.resolved == other.resolved
+    }
+
+    fn starts_with(&self, base: &Self) -> bool {
+        self.raw.starts_with(&base.raw) || self.resolved.starts_with(&base.resolved)
+    }
+}
+
+fn resolve_path(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    let mut cur = path;
+    let mut suffix = Vec::new();
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        if let Ok(mut base) = std::fs::canonicalize(parent) {
+            for part in suffix.into_iter().rev() {
+                base.push(part);
+            }
+            return base;
+        }
+        cur = parent;
+    }
+    path.components().collect()
+}
+
+fn is_protected_dir(
+    dir: &NormalizedPath,
+    home: Option<&NormalizedPath>,
+    tmpdir: Option<&NormalizedPath>,
+) -> bool {
+    if dir.raw == Path::new("/") || dir.resolved == Path::new("/") {
+        return true;
+    }
+    if let Some(h) = home {
+        if h.starts_with(dir) {
+            return true;
+        }
+    }
+    if let Some(t) = tmpdir {
+        if dir.matches(t) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strips PATH entries belonging to inherited terminal wrappers (e.g. cmux, VS Code)
+/// while preserving `keep` (Cawide's `bin_dir`) and never dropping `/`, `$HOME`,
+/// ancestors of `$HOME`, or `$TMPDIR` itself.
+pub fn sanitize_inherited_path<'a, I>(
+    path: &std::ffi::OsStr,
+    identity_vars: I,
+    home: Option<&Path>,
+    tmpdir: Option<&Path>,
+    keep: &Path,
+) -> std::ffi::OsString
+where
+    I: IntoIterator<Item = (&'a str, &'a std::ffi::OsStr)>,
+{
+    let home_norm = home
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(NormalizedPath::new);
+    let tmpdir_norm = tmpdir
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(NormalizedPath::new);
+    let keep_norm = NormalizedPath::new(keep);
+
+    let mut drop_exact: Vec<NormalizedPath> = Vec::new();
+    let mut drop_subtrees: Vec<NormalizedPath> = Vec::new();
+
+    for (key, val) in identity_vars {
+        if val.is_empty() || !crate::pty::session::is_inherited_terminal_identity(key) {
+            continue;
+        }
+        let p = Path::new(val);
+        let Ok(meta) = std::fs::metadata(p) else {
+            continue;
+        };
+        if meta.is_file() {
+            if let Some(parent) = p.parent() {
+                let parent_norm = NormalizedPath::new(parent);
+                if !is_protected_dir(&parent_norm, home_norm.as_ref(), tmpdir_norm.as_ref()) {
+                    drop_exact.push(parent_norm);
+                }
+            }
+        } else if meta.is_dir() {
+            let dir_norm = NormalizedPath::new(p);
+            if !is_protected_dir(&dir_norm, home_norm.as_ref(), tmpdir_norm.as_ref()) {
+                drop_subtrees.push(dir_norm);
+            }
+        }
+    }
+
+    if drop_exact.is_empty() && drop_subtrees.is_empty() {
+        return path.to_os_string();
+    }
+
+    let kept: Vec<PathBuf> = std::env::split_paths(path)
+        .filter(|entry| {
+            if entry.as_os_str().is_empty() {
+                return false;
+            }
+            let entry_norm = NormalizedPath::new(entry);
+            if entry_norm.matches(&keep_norm) {
+                return true;
+            }
+            if drop_exact.iter().any(|d| entry_norm.matches(d)) {
+                return false;
+            }
+            if drop_subtrees.iter().any(|d| entry_norm.starts_with(d)) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    std::env::join_paths(kept).unwrap_or_else(|_| path.to_os_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_inherited_path;
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+
+    #[test]
+    fn sanitize_inherited_path_drops_cmux_shim_root_and_bundled_cli_parent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmpdir = tmp.path().join("tmp");
+        let home = tmp.path().join("home");
+        let cmux_root = tmpdir.join("cmux-shims-123");
+        let cmux_sub = cmux_root.join("bin");
+        let bundled_dir = tmp
+            .path()
+            .join("Applications/cmux.app/Contents/Resources/bin");
+        let bundled_cli = bundled_dir.join("cmux");
+        let user_bin = home.join(".local/bin");
+        let keep_bin = home.join(".config/cawide/bin");
+
+        std::fs::create_dir_all(&cmux_sub).expect("cmux_sub");
+        std::fs::create_dir_all(&bundled_dir).expect("bundled_dir");
+        std::fs::write(&bundled_cli, b"#!/bin/sh\n").expect("bundled_cli");
+        std::fs::create_dir_all(&user_bin).expect("user_bin");
+        std::fs::create_dir_all(&keep_bin).expect("keep_bin");
+
+        let path =
+            std::env::join_paths([&keep_bin, &cmux_root, &cmux_sub, &bundled_dir, &user_bin])
+                .expect("join_paths");
+
+        let vars = [
+            ("CMUX_SHIM_ROOT", cmux_root.as_os_str()),
+            ("CMUX_BUNDLED_CLI_PATH", bundled_cli.as_os_str()),
+        ];
+        let out = sanitize_inherited_path(&path, vars, Some(&home), Some(&tmpdir), &keep_bin);
+        let entries: Vec<PathBuf> = std::env::split_paths(&out).collect();
+        assert_eq!(entries, vec![keep_bin, user_bin]);
+    }
+
+    #[test]
+    fn sanitize_inherited_path_vscode_ipc_in_tmpdir_keeps_other_tmpdir_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmpdir = tmp.path().join("tmp");
+        let home = tmp.path().join("home");
+        let other_tmp_bin = tmpdir.join("my-tools/bin");
+        let keep_bin = home.join(".config/cawide/bin");
+        std::fs::create_dir_all(&other_tmp_bin).expect("other_tmp_bin");
+        std::fs::create_dir_all(&keep_bin).expect("keep_bin");
+
+        // Case 1: non-file / socket path (or Unix socket on unix)
+        let sock_path = tmpdir.join("vscode-git.sock");
+        #[cfg(unix)]
+        let _listener = std::os::unix::net::UnixListener::bind(&sock_path).expect("bind sock");
+
+        let path = std::env::join_paths([&other_tmp_bin, &keep_bin]).expect("join_paths");
+        let vars = [("VSCODE_GIT_IPC_HANDLE", sock_path.as_os_str())];
+        let out = sanitize_inherited_path(&path, vars, Some(&home), Some(&tmpdir), &keep_bin);
+        let entries: Vec<PathBuf> = std::env::split_paths(&out).collect();
+        assert_eq!(entries, vec![other_tmp_bin.clone(), keep_bin.clone()]);
+
+        // Case 2: even if VSCODE_GIT_IPC_HANDLE is a regular file in $TMPDIR, nothing else under $TMPDIR is dropped
+        let file_in_tmp = tmpdir.join("vscode-ipc.file");
+        std::fs::write(&file_in_tmp, b"x").expect("write file");
+        let path_with_tmpdir =
+            std::env::join_paths([&tmpdir, &other_tmp_bin, &keep_bin]).expect("join_paths");
+        let vars2 = [("VSCODE_GIT_IPC_HANDLE", file_in_tmp.as_os_str())];
+        let out2 = sanitize_inherited_path(
+            &path_with_tmpdir,
+            vars2,
+            Some(&home),
+            Some(&tmpdir),
+            &keep_bin,
+        );
+        let entries2: Vec<PathBuf> = std::env::split_paths(&out2).collect();
+        assert_eq!(entries2, vec![tmpdir, other_tmp_bin, keep_bin]);
+    }
+
+    #[test]
+    fn sanitize_inherited_path_never_drops_home_ancestors_root_or_tmpdir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmpdir = tmp.path().join("tmp");
+        let home_parent = tmp.path().join("Users");
+        let home = home_parent.join("alice");
+        let home_bin = home.join("bin");
+        let keep_bin = home.join(".config/cawide/bin");
+        std::fs::create_dir_all(&tmpdir).expect("tmpdir");
+        std::fs::create_dir_all(&home_bin).expect("home_bin");
+        std::fs::create_dir_all(&keep_bin).expect("keep_bin");
+
+        let path = std::env::join_paths([
+            PathBuf::from("/"),
+            home_parent.clone(),
+            home.clone(),
+            home_bin.clone(),
+            tmpdir.clone(),
+            keep_bin.clone(),
+        ])
+        .expect("join_paths");
+
+        let vars = [
+            ("CMUX_ROOT", OsStr::new("/")),
+            ("WARP_ANCESTOR", home_parent.as_os_str()),
+            ("KITTY_HOME", home.as_os_str()),
+            ("WEZTERM_TMP", tmpdir.as_os_str()),
+        ];
+        let out = sanitize_inherited_path(&path, vars, Some(&home), Some(&tmpdir), &keep_bin);
+        let entries: Vec<PathBuf> = std::env::split_paths(&out).collect();
+        assert_eq!(
+            entries,
+            vec![
+                PathBuf::from("/"),
+                home_parent,
+                home,
+                home_bin,
+                tmpdir,
+                keep_bin
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_inherited_path_preserves_keep_even_under_dropped_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dropped_root = tmp.path().join("wrapper");
+        let dropped_other = dropped_root.join("other");
+        let keep_bin = dropped_root.join("cawide/bin");
+        std::fs::create_dir_all(&dropped_other).expect("dropped_other");
+        std::fs::create_dir_all(&keep_bin).expect("keep_bin");
+
+        let path =
+            std::env::join_paths([&dropped_root, &dropped_other, &keep_bin]).expect("join_paths");
+        let vars = [("CMUX_WRAPPER_DIR", dropped_root.as_os_str())];
+        let out = sanitize_inherited_path(&path, vars, None, None, &keep_bin);
+        let entries: Vec<PathBuf> = std::env::split_paths(&out).collect();
+        assert_eq!(entries, vec![keep_bin]);
     }
 }

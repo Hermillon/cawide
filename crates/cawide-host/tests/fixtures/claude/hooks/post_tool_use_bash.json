@@ -1,0 +1,27 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "0913e41a-9ada-437c-82f0-f96172eb00e9",
+  "permission_mode": "default",
+  "agent_id": "a55007b4ac21d72a1",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls -la /tmp/cc-w2-DQ6UiH",
+    "description": "List all entries in /tmp/cc-w2-DQ6UiH"
+  },
+  "tool_response": {
+    "stdout": "total 104\ndrwx------   11 dev  wheel    352 Nov 25 21:53 .\ndrwxrwxrwt  322 root        wheel  10304 Nov 25 21:54 ..\ndrwxr-xr-x    9 dev  wheel    288 Nov 25 21:51 .git\n-rwxr-xr-x    1 dev  wheel     96 Nov 25 21:51 hook.sh\n-rw-r--r--    1 dev  wheel    141 Nov 25 21:51 mcp.json\n-rwxr-xr-x    1 dev  wheel   1560 Nov 25 21:51 mcp_server.py\n-rw-r--r--    1 dev  wheel  26551 Nov 25 21:54 raw.tsv\n-rw-r--r--    1 dev  wheel     22 Nov 25 21:53 sample.txt\ndrwxr-xr-x    8 dev  wheel    256 Nov 25 21:54 screens\n-rw-r--r--    1 dev  wheel   3086 Nov 25 21:51 settings.json\n-rw-r--r--    1 dev  wheel     13 Nov 25 21:53 written.txt",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "call_16015620928815175252",
+  "duration_ms": 78
+}

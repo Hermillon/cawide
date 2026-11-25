@@ -1,0 +1,33 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "2240af17-b235-4eb2-9dbd-f3c45de14052",
+  "permission_mode": "default",
+  "agent_id": "a55007b4ac21d72a1",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528/subagents/agent-a55007b4ac21d72a1.jsonl",
+  "last_assistant_message": "hook.sh\nmcp.json\nmcp_server.py\nraw.tsv\nsample.txt\nsettings.json\nwritten.txt",
+  "background_tasks": [
+    {
+      "id": "a55007b4ac21d72a1",
+      "type": "subagent",
+      "status": "running",
+      "description": "List files in /tmp/cc-w2-DQ6UiH",
+      "agent_type": "Explore"
+    },
+    {
+      "id": "bxp7cnwl3",
+      "type": "shell",
+      "status": "running",
+      "description": "Run sleep 25 in the background",
+      "command": "sleep 25"
+    }
+  ],
+  "session_crons": []
+}

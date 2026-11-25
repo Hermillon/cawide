@@ -1,0 +1,27 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "55235b3e-328d-4ac9-b9c6-31275b189546",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__w2demo__echo_msg",
+  "tool_input": {
+    "message": "hello mcp"
+  },
+  "tool_response": [
+    {
+      "type": "text",
+      "text": "echo: hello mcp"
+    }
+  ],
+  "tool_use_id": "call_9711751708694963467",
+  "duration_ms": 16,
+  "mcp_server": {
+    "name": "w2demo",
+    "source": "dynamic"
+  }
+}

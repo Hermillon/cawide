@@ -1,0 +1,40 @@
+  ⎿  Wrote 1 line to /tmp/cc-w2-DQ6UiH/written.txt
+      1 hello from w2
+  ⎿  PostToolUse:Write hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ Created /tmp/cc-w2-DQ6UiH/written.txt with the content hello from w2.
+
+⏺ Ran 2 stop hooks
+  ⎿  Stop hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+✻ Cogitated for 6s · done 9:53 PM
+
+❯ Use the Edit tool on /tmp/cc-w2-DQ6UiH/sample.txt to replace 'hello world' with 'hello cawide'
+  ⎿  UserPromptSubmit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+  Read 1 file
+  ⎿  PreToolUse:Read hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+     Exit 127, likely a missing program: The check may not have run. See /hooks.
+  ⎿  PostToolUse:Read hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ Update(/tmp/cc-w2-DQ6UiH/sample.txt)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Edit file
+ ../../../tmp/cc-w2-DQ6UiH/sample.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ 1 -hello world
+ 1 +hello cawide
+ 2  line two
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to make this edit to sample.txt?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend

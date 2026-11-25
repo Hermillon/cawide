@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::agent::detect::{classify, Foreground};
-use crate::agent::map::AgentSignal;
+use crate::agent::map::{AgentSignal, SignalResolution, TurnOutcome};
 use crate::agent::tracker::{AgentTracker, Attention, TrackerAlert};
 use crate::net::broadcaster::HostEventBroadcaster;
 use crate::pty::output::TerminalSignals;
@@ -30,6 +30,27 @@ pub enum ClaimResult {
     Occupied,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudePendingKind {
+    Approval,
+    Ask,
+    Plan,
+}
+
+pub struct PendingPermission {
+    pub reply_tx: tokio::sync::oneshot::Sender<crate::net::ipc::ClaudeReply>,
+    pub kind: ClaudePendingKind,
+    pub tool_use_id: Option<String>,
+    pub tool_name: String,
+    pub anchor: Option<crate::agent::claude::PermissionAnchor>,
+    pub anchor_seen_on_attach: bool,
+}
+
+pub struct ClaudeRegisteredInfo {
+    pub request_key: String,
+    pub tool_use_id: Option<String>,
+}
+
 pub struct SessionEntry {
     pub session: Arc<PtySession>,
     pub cwd: PathBuf,
@@ -46,8 +67,10 @@ pub struct SessionEntry {
         tokio::sync::mpsc::Sender<crate::net::ipc::IpcStreamOut>,
     )>,
     pub respond_lock: Arc<tokio::sync::Mutex<()>>,
+    pub claude_state: crate::agent::claude::ClaudeSessionState,
+    pub pending_permissions: HashMap<String, PendingPermission>,
+    pub last_anchor_check_ms: u64,
 }
-
 pub struct SessionRegistry {
     sessions: parking_lot::RwLock<HashMap<String, SessionEntry>>,
     workdir: PathBuf,
@@ -67,6 +90,7 @@ pub struct RespondSnapshot {
     pub session: Arc<PtySession>,
     pub agent_state: Option<cawide_protocol::types::AgentState>,
     pub head_attention: Option<Attention>,
+    pub claude_pending: Option<(String, ClaudePendingKind)>,
 }
 /// Session ids: 1..=64 bytes of `[A-Za-z0-9_-]`.
 pub fn validate_session_id(id: &str) -> bool {
@@ -149,6 +173,18 @@ fn summary(id: &str, e: &SessionEntry) -> SessionSummary {
         title: e.title.clone(),
         revision: e.revision,
     }
+}
+fn sweep_pending(entry: &mut SessionEntry) {
+    let attention_keys = entry.tracker.attention_keys();
+    let attention_set: std::collections::HashSet<&str> =
+        attention_keys.iter().map(String::as_str).collect();
+    entry
+        .pending_permissions
+        .retain(|k, _| attention_set.contains(k.as_str()));
+    entry
+        .claude_state
+        .open_perms
+        .retain(|p| attention_set.contains(p.key.as_str()));
 }
 
 pub enum HookOutcome {
@@ -476,6 +512,9 @@ impl SessionRegistry {
                 exit_alerted: false,
                 agent_stream: None,
                 respond_lock: Arc::new(tokio::sync::Mutex::new(())),
+                claude_state: crate::agent::claude::ClaudeSessionState::default(),
+                pending_permissions: HashMap::new(),
+                last_anchor_check_ms: 0,
             },
         );
         drop(sessions);
@@ -548,6 +587,9 @@ impl SessionRegistry {
             exit_alerted: false,
             agent_stream: None,
             respond_lock: Arc::new(tokio::sync::Mutex::new(())),
+            claude_state: crate::agent::claude::ClaudeSessionState::default(),
+            pending_permissions: HashMap::new(),
+            last_anchor_check_ms: 0,
         };
         let sum = summary(session_id, &entry);
         sessions.insert(session_id.to_string(), entry);
@@ -656,10 +698,21 @@ impl SessionRegistry {
         if !entry.session.is_alive() {
             return None;
         }
+        let claude_pending = entry
+            .tracker
+            .head_attention()
+            .and_then(|h| h.key.as_deref())
+            .and_then(|k| {
+                entry
+                    .pending_permissions
+                    .get(k)
+                    .map(|p| (k.to_string(), p.kind))
+            });
         Some(RespondSnapshot {
             session: Arc::clone(&entry.session),
             agent_state: entry.tracker.current(),
             head_attention: entry.tracker.head_attention().cloned(),
+            claude_pending,
         })
     }
 
@@ -757,6 +810,7 @@ impl SessionRegistry {
         if let Some(activity) = res.activity {
             self.emit_activity(session_id, entry, activity, ts);
         }
+        sweep_pending(entry);
         if res.changed {
             entry.revision = self.bump();
             HookOutcome::Updated(Box::new(summary(session_id, entry)))
@@ -851,6 +905,7 @@ impl SessionRegistry {
                         entry.revision = self.bump();
                         changed.push(summary(&obs.id, entry));
                     }
+                    sweep_pending(entry);
                 }
             }
         }
@@ -962,6 +1017,401 @@ impl SessionRegistry {
                 tracing::debug!(session = %id, error = %e, "failed to kill session");
             }
         }
+    }
+    pub fn apply_claude_event(
+        &self,
+        session_id: &str,
+        ev: crate::net::ipc::ClaudeHookEvent,
+    ) -> HookOutcome {
+        let mut sessions = self.sessions.write();
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return HookOutcome::UnknownSession;
+        };
+        let effects = entry.claude_state.apply(ev, None);
+        let mut changed = false;
+        let ts = now_secs();
+        let now_ms = now_millis();
+        let osc_seq = entry.session.osc_seq();
+
+        let signal_resolves = effects
+            .signal
+            .as_ref()
+            .is_some_and(|s| !matches!(s.resolution, SignalResolution::None));
+        if !effects.dismiss.is_empty() && !signal_resolves {
+            let res = entry.tracker.resolve_keys(&effects.dismiss, ts, now_ms);
+            if let Some(alert) = res.alert {
+                self.emit_alert(session_id, entry, alert);
+            }
+            if let Some(activity) = res.activity {
+                self.emit_activity(session_id, entry, activity, ts);
+            }
+            if res.changed {
+                changed = true;
+            }
+        }
+
+        if let Some(signal) = effects.signal {
+            let res = entry
+                .tracker
+                .on_hook_signal("claude", signal, ts, now_ms, osc_seq);
+            if let Some(alert) = res.alert {
+                self.emit_alert(session_id, entry, alert);
+            }
+            if let Some(activity) = res.activity {
+                self.emit_activity(session_id, entry, activity, ts);
+            }
+            if res.changed {
+                changed = true;
+            }
+        }
+
+        sweep_pending(entry);
+
+        if changed {
+            entry.revision = self.bump();
+            HookOutcome::Updated(Box::new(summary(session_id, entry)))
+        } else {
+            HookOutcome::Ignored
+        }
+    }
+
+    pub fn register_claude_permission(
+        &self,
+        session_id: &str,
+        ev: crate::net::ipc::ClaudeHookEvent,
+        att: crate::agent::map::AttentionSpec,
+        reply_tx: tokio::sync::oneshot::Sender<crate::net::ipc::ClaudeReply>,
+    ) -> Result<ClaudeRegisteredInfo, String> {
+        let mut sessions = self.sessions.write();
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return Err("session not found".into());
+        };
+
+        let tool_name = ev.tool_name.clone().unwrap_or_default();
+        let kind = match att.kind {
+            crate::agent::map::AttentionKind::Approval => ClaudePendingKind::Approval,
+            crate::agent::map::AttentionKind::Ask { .. } => ClaudePendingKind::Ask,
+            crate::agent::map::AttentionKind::Plan { .. } => ClaudePendingKind::Plan,
+            crate::agent::map::AttentionKind::TextQuestion => ClaudePendingKind::Approval,
+        };
+        let anchor = crate::agent::claude::permission_dialog_anchor(&tool_name, &att.prompt);
+
+        let effects = entry.claude_state.apply(ev, Some(att));
+        let Some(req_key) = effects.request_key else {
+            return Err("permission request refused by claude state".into());
+        };
+        let tool_use_id = effects.registered_tool_use_id;
+
+        let ts = now_secs();
+        let now_ms = now_millis();
+        let osc_seq = entry.session.osc_seq();
+
+        let mut changed = false;
+        let signal_resolves = effects
+            .signal
+            .as_ref()
+            .is_some_and(|s| !matches!(s.resolution, SignalResolution::None));
+        if !effects.dismiss.is_empty() && !signal_resolves {
+            let res = entry.tracker.resolve_keys(&effects.dismiss, ts, now_ms);
+            if let Some(alert) = res.alert {
+                self.emit_alert(session_id, entry, alert);
+            }
+            if let Some(activity) = res.activity {
+                self.emit_activity(session_id, entry, activity, ts);
+            }
+            if res.changed {
+                changed = true;
+            }
+        }
+
+        if let Some(signal) = effects.signal {
+            let res = entry
+                .tracker
+                .on_hook_signal("claude", signal, ts, now_ms, osc_seq);
+            if let Some(alert) = res.alert {
+                self.emit_alert(session_id, entry, alert);
+            }
+            if let Some(activity) = res.activity {
+                self.emit_activity(session_id, entry, activity, ts);
+            }
+            if res.changed {
+                changed = true;
+            }
+        }
+
+        let screen = entry.session.screen_contents();
+        let anchor_seen_on_attach = anchor
+            .as_ref()
+            .is_some_and(|a| crate::agent::claude::anchor_visible_on_screen(&screen, a));
+
+        entry.pending_permissions.insert(
+            req_key.clone(),
+            PendingPermission {
+                reply_tx,
+                kind,
+                tool_use_id: tool_use_id.clone(),
+                tool_name,
+                anchor,
+                anchor_seen_on_attach,
+            },
+        );
+
+        sweep_pending(entry);
+        let retained = entry.pending_permissions.contains_key(&req_key);
+        if !retained {
+            entry.claude_state.open_perms.retain(|p| p.key != req_key);
+        }
+
+        if changed {
+            entry.revision = self.bump();
+            let sum = summary(session_id, entry);
+            drop(sessions);
+            self.broadcaster
+                .broadcast(cawide_protocol::HostEvent::SessionUpdated { summary: sum });
+        }
+
+        if !retained {
+            return Err("permission request was not accepted into attention queue".into());
+        }
+
+        Ok(ClaudeRegisteredInfo {
+            request_key: req_key,
+            tool_use_id,
+        })
+    }
+
+    pub fn resolve_claude_hook_frame(
+        &self,
+        session_id: &str,
+        key: &str,
+        frame: Option<crate::net::ipc::ClaudeHookFrame>,
+    ) {
+        let mut sessions = self.sessions.write();
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let ts = now_secs();
+        let now_ms = now_millis();
+        let osc_seq = entry.session.osc_seq();
+
+        let mut changed = false;
+        match frame {
+            Some(crate::net::ipc::ClaudeHookFrame::Interrupted) => {
+                if entry.pending_permissions.remove(key).is_some() {
+                    entry.claude_state.open_perms.clear();
+                    entry.claude_state.open_notifs.clear();
+                    entry.claude_state.currently_thinking_base = None;
+                    let signal = AgentSignal {
+                        status: AgentStatus::Idle,
+                        attention: None,
+                        outcome: TurnOutcome::Aborted,
+                        resolution: SignalResolution::ClearAll,
+                        seq: None,
+                        epoch: None,
+                    };
+                    let res = entry
+                        .tracker
+                        .on_hook_signal("claude", signal, ts, now_ms, osc_seq);
+                    if let Some(alert) = res.alert {
+                        self.emit_alert(session_id, entry, alert);
+                    }
+                    if let Some(activity) = res.activity {
+                        self.emit_activity(session_id, entry, activity, ts);
+                    }
+                    sweep_pending(entry);
+                    changed = true;
+                }
+            }
+            Some(crate::net::ipc::ClaudeHookFrame::AnsweredElsewhere) | None => {
+                if entry.pending_permissions.remove(key).is_some() {
+                    entry.claude_state.open_perms.retain(|p| p.key != key);
+                    let res = entry.tracker.resolve_keys(&[key.to_string()], ts, now_ms);
+                    if let Some(alert) = res.alert {
+                        self.emit_alert(session_id, entry, alert);
+                    }
+                    if let Some(activity) = res.activity {
+                        self.emit_activity(session_id, entry, activity, ts);
+                    }
+                    sweep_pending(entry);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            entry.revision = self.bump();
+            let sum = summary(session_id, entry);
+            drop(sessions);
+            self.broadcaster
+                .broadcast(cawide_protocol::HostEvent::SessionUpdated { summary: sum });
+        }
+    }
+
+    pub fn send_claude_reply(
+        &self,
+        session_id: &str,
+        key: &str,
+        expected_id: u64,
+        reply: crate::net::ipc::ClaudeReply,
+    ) -> Result<(), String> {
+        let mut sessions = self.sessions.write();
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return Err("session not found".into());
+        };
+
+        if expected_id != 0
+            && !entry
+                .tracker
+                .head_attention()
+                .is_some_and(|h| h.id == expected_id)
+        {
+            return Err("prompt no longer open".into());
+        }
+
+        let Some(pending) = entry.pending_permissions.get(key) else {
+            return Err("prompt no longer open".into());
+        };
+        if pending.reply_tx.is_closed() {
+            return Err("permission hook disconnected".into());
+        }
+
+        let pending = entry
+            .pending_permissions
+            .remove(key)
+            .expect("checked above");
+
+        entry.claude_state.open_perms.retain(|p| p.key != key);
+        let ts = now_secs();
+        let now_ms = now_millis();
+        let res = entry.tracker.resolve_keys(&[key.to_string()], ts, now_ms);
+        if let Some(alert) = res.alert {
+            self.emit_alert(session_id, entry, alert);
+        }
+        if let Some(activity) = res.activity {
+            self.emit_activity(session_id, entry, activity, ts);
+        }
+        sweep_pending(entry);
+        entry.revision = self.bump();
+        let sum = summary(session_id, entry);
+        drop(sessions);
+        self.broadcaster
+            .broadcast(cawide_protocol::HostEvent::SessionUpdated { summary: sum });
+
+        pending
+            .reply_tx
+            .send(reply)
+            .map_err(|_| "permission hook disconnected".to_string())
+    }
+
+    pub fn maybe_schedule_claude_anchor_check(self: &Arc<Self>, session_id: &str, input: &[u8]) {
+        let is_trigger =
+            input.contains(&b'\r') || input.iter().any(|b| b.is_ascii_digit()) || input == b"\x1b";
+        if !is_trigger {
+            return;
+        }
+
+        {
+            let sessions = self.sessions.read();
+            let Some(entry) = sessions.get(session_id) else {
+                return;
+            };
+            if entry.pending_permissions.is_empty() {
+                return;
+            }
+        }
+
+        let should_spawn = {
+            let mut sessions = self.sessions.write();
+            let Some(entry) = sessions.get_mut(session_id) else {
+                return;
+            };
+            if entry.pending_permissions.is_empty() {
+                return;
+            }
+            let has_watched_pending = entry
+                .pending_permissions
+                .values()
+                .any(|p| p.anchor.is_some() && p.anchor_seen_on_attach);
+            if !has_watched_pending {
+                let screen = entry.session.screen_contents();
+                for pending in entry.pending_permissions.values_mut() {
+                    if let Some(ref a) = pending.anchor {
+                        if !pending.anchor_seen_on_attach
+                            && crate::agent::claude::anchor_visible_on_screen(&screen, a)
+                        {
+                            pending.anchor_seen_on_attach = true;
+                        }
+                    }
+                }
+                let has_now = entry
+                    .pending_permissions
+                    .values()
+                    .any(|p| p.anchor.is_some() && p.anchor_seen_on_attach);
+                if !has_now {
+                    return;
+                }
+            }
+            let now = now_millis();
+            if now.saturating_sub(entry.last_anchor_check_ms) < 300 {
+                return;
+            }
+            entry.last_anchor_check_ms = now;
+            true
+        };
+
+        if should_spawn {
+            let reg = Arc::clone(self);
+            let s_id = session_id.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                reg.perform_claude_anchor_check(&s_id);
+            });
+        }
+    }
+
+    fn perform_claude_anchor_check(&self, session_id: &str) {
+        let mut sessions = self.sessions.write();
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let screen = entry.session.screen_contents();
+        let mut dismissed_keys = Vec::new();
+        for (key, pending) in &mut entry.pending_permissions {
+            if let Some(ref a) = pending.anchor {
+                if pending.anchor_seen_on_attach {
+                    if !crate::agent::claude::anchor_visible_on_screen(&screen, a) {
+                        dismissed_keys.push(key.clone());
+                    }
+                } else if crate::agent::claude::anchor_visible_on_screen(&screen, a) {
+                    pending.anchor_seen_on_attach = true;
+                }
+            }
+        }
+
+        if dismissed_keys.is_empty() {
+            return;
+        }
+
+        for k in &dismissed_keys {
+            entry.pending_permissions.remove(k);
+            entry.claude_state.open_perms.retain(|p| &p.key != k);
+        }
+
+        let ts = now_secs();
+        let now_ms = now_millis();
+        let res = entry.tracker.resolve_keys(&dismissed_keys, ts, now_ms);
+        if let Some(alert) = res.alert {
+            self.emit_alert(session_id, entry, alert);
+        }
+        if let Some(activity) = res.activity {
+            self.emit_activity(session_id, entry, activity, ts);
+        }
+        sweep_pending(entry);
+        entry.revision = self.bump();
+        let sum = summary(session_id, entry);
+        drop(sessions);
+        self.broadcaster
+            .broadcast(cawide_protocol::HostEvent::SessionUpdated { summary: sum });
     }
 }
 
@@ -1285,6 +1735,9 @@ mod tests {
             exit_alerted: false,
             agent_stream: None,
             respond_lock: Arc::new(tokio::sync::Mutex::new(())),
+            claude_state: crate::agent::claude::ClaudeSessionState::default(),
+            pending_permissions: HashMap::new(),
+            last_anchor_check_ms: 0,
         };
         assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("Custom Tab"));
 
@@ -1296,5 +1749,135 @@ mod tests {
 
         entry.cwd = PathBuf::from("/");
         assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("sess-1"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_claude_permission_guards_and_stale_interrupted() {
+        use crate::agent::map::{AttentionKind, AttentionSpec};
+        use crate::net::ipc::{ClaudeEventKind, ClaudeHookEvent, ClaudeHookFrame, ClaudeReply};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let broadcaster = Arc::new(HostEventBroadcaster::new(16));
+        let reg = SessionRegistry::new(
+            tmp.path().to_path_buf(),
+            Some("cat".into()),
+            Vec::new(),
+            Arc::clone(&broadcaster),
+        );
+        reg.create_session("s-claude-guards", None, None, 80, 24)
+            .unwrap();
+
+        // Start a turn so tracker is Thinking
+        reg.apply_claude_event(
+            "s-claude-guards",
+            ClaudeHookEvent {
+                session_id: "s-claude-guards".into(),
+                claude_session_id: "cc-1".into(),
+                kind: ClaudeEventKind::UserPromptSubmit,
+                source: None,
+                tool_name: None,
+                tool_use_id: None,
+                input_hash: None,
+                agent_id: None,
+                notification_type: None,
+                text: Some("run ls".into()),
+                background_count: 0,
+            },
+        );
+
+        // 1. Register permission, then drop reply_rx -> send_claude_reply fails BEFORE mutating state
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let info1 = reg
+            .register_claude_permission(
+                "s-claude-guards",
+                ClaudeHookEvent {
+                    session_id: "s-claude-guards".into(),
+                    claude_session_id: "cc-1".into(),
+                    kind: ClaudeEventKind::PermissionRequest,
+                    source: None,
+                    tool_name: Some("Bash".into()),
+                    tool_use_id: Some("t1".into()),
+                    input_hash: Some(1),
+                    agent_id: None,
+                    notification_type: None,
+                    text: None,
+                    background_count: 0,
+                },
+                AttentionSpec {
+                    key: None,
+                    kind: AttentionKind::Approval,
+                    prompt: "Allow Bash: ls?".into(),
+                    options: vec!["Allow".into(), "Deny".into()],
+                    actionable: true,
+                },
+                tx1,
+            )
+            .unwrap();
+
+        let snap_before = reg.respond_snapshot("s-claude-guards").unwrap();
+        let head_id = snap_before.head_attention.as_ref().unwrap().id;
+
+        // Mismatched expected_id rejected
+        assert_eq!(
+            reg.send_claude_reply(
+                "s-claude-guards",
+                &info1.request_key,
+                head_id + 999,
+                ClaudeReply::Allow,
+            ),
+            Err("prompt no longer open".into())
+        );
+        assert!(reg
+            .respond_snapshot("s-claude-guards")
+            .unwrap()
+            .claude_pending
+            .is_some());
+
+        // Closed reply_tx rejected without mutating tracker/pending
+        drop(rx1);
+        assert_eq!(
+            reg.send_claude_reply(
+                "s-claude-guards",
+                &info1.request_key,
+                head_id,
+                ClaudeReply::Allow,
+            ),
+            Err("permission hook disconnected".into())
+        );
+        assert!(reg
+            .respond_snapshot("s-claude-guards")
+            .unwrap()
+            .claude_pending
+            .is_some());
+
+        // Clean up perm-1 via AnsweredElsewhere
+        reg.resolve_claude_hook_frame(
+            "s-claude-guards",
+            &info1.request_key,
+            Some(ClaudeHookFrame::AnsweredElsewhere),
+        );
+        assert!(matches!(
+            reg.respond_snapshot("s-claude-guards")
+                .unwrap()
+                .agent_state
+                .unwrap()
+                .status,
+            AgentStatus::Thinking { .. }
+        ));
+
+        // 2. Stale Interrupted frame for already-resolved key must NOT wipe active Thinking state
+        reg.resolve_claude_hook_frame(
+            "s-claude-guards",
+            &info1.request_key,
+            Some(ClaudeHookFrame::Interrupted),
+        );
+        assert!(matches!(
+            reg.respond_snapshot("s-claude-guards")
+                .unwrap()
+                .agent_state
+                .unwrap()
+                .status,
+            AgentStatus::Thinking { .. }
+        ));
     }
 }

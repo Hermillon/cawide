@@ -201,6 +201,9 @@ impl SessionOutput {
     pub fn resize(&mut self, cols: NonZeroU16, rows: NonZeroU16) {
         self.terminal.set_size(rows, cols);
     }
+    pub fn screen_contents(&self) -> String {
+        self.terminal.screen().contents()
+    }
 
     pub fn signals(&self) -> TerminalSignals {
         let cb = self.terminal.callbacks();

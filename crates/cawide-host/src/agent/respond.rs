@@ -94,6 +94,10 @@ enum ActionPlan {
         sanitized: String,
     },
     RawBytes(Vec<u8>),
+    ClaudeReply {
+        key: String,
+        reply: crate::net::ipc::ClaudeReply,
+    },
 }
 
 struct ValidatedTarget {
@@ -143,6 +147,61 @@ fn validate_target(
             let expected_id = if prompt_id != 0 { prompt_id } else { head.id };
             let expected_prompt = head.prompt.clone();
             let is_omp = state.agent == "omp";
+            let is_claude = state.agent == "claude";
+            if is_claude {
+                if !head.actionable {
+                    return Err("unsupported choice".into());
+                }
+                let (key, kind) = snap
+                    .claude_pending
+                    .ok_or_else(|| "prompt no longer open".to_string())?;
+
+                let reply = match kind {
+                    crate::net::registry::ClaudePendingKind::Approval => match choice {
+                        AgentChoice::Option { index } => match *index {
+                            0 => crate::net::ipc::ClaudeReply::Allow,
+                            1 => crate::net::ipc::ClaudeReply::Deny { message: None },
+                            _ => return Err("unsupported choice".into()),
+                        },
+                        AgentChoice::Text { text } => crate::net::ipc::ClaudeReply::Deny {
+                            message: Some(sanitize_reply_text(text)?),
+                        },
+                    },
+                    crate::net::registry::ClaudePendingKind::Ask => match choice {
+                        AgentChoice::Option { index } => {
+                            if (*index as usize) >= head.options.len() {
+                                return Err("unsupported choice".into());
+                            }
+                            crate::net::ipc::ClaudeReply::Answer {
+                                option_index: Some(*index),
+                                text: None,
+                            }
+                        }
+                        AgentChoice::Text { text } => crate::net::ipc::ClaudeReply::Answer {
+                            option_index: None,
+                            text: Some(sanitize_reply_text(text)?),
+                        },
+                    },
+                    crate::net::registry::ClaudePendingKind::Plan => match choice {
+                        AgentChoice::Option { index } => match *index {
+                            0 => crate::net::ipc::ClaudeReply::ApprovePlan {
+                                accept_edits: false,
+                            },
+                            1 => crate::net::ipc::ClaudeReply::ApprovePlan { accept_edits: true },
+                            _ => return Err("unsupported choice".into()),
+                        },
+                        AgentChoice::Text { text } => crate::net::ipc::ClaudeReply::Deny {
+                            message: Some(sanitize_reply_text(text)?),
+                        },
+                    },
+                };
+
+                return Ok(ValidatedTarget {
+                    expected_id,
+                    expected_prompt,
+                    plan: ActionPlan::ClaudeReply { key, reply },
+                });
+            }
 
             let plan = match &head.kind {
                 AttentionKind::Approval => match choice {
@@ -417,6 +476,13 @@ pub async fn respond_to_session(
         } => {
             let _ = ensure_still_valid(registry, session_id, expected_id, &expected_prompt)?;
             registry.send_plan_review_resolution(session_id, &review_id, &option_id)?;
+            registry.touch(session_id);
+            registry.mark_input();
+            Ok(())
+        }
+        ActionPlan::ClaudeReply { key, reply } => {
+            let _ = ensure_still_valid(registry, session_id, expected_id, &expected_prompt)?;
+            registry.send_claude_reply(session_id, &key, expected_id, reply)?;
             registry.touch(session_id);
             registry.mark_input();
             Ok(())

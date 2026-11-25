@@ -1,0 +1,9 @@
+{
+  "session_id": "41b93ac5-f042-4683-af06-0e8e9ee7f8ff",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-fx/41b93ac5-f042-4683-af06-0e8e9ee7f8ff.jsonl",
+  "cwd": "/private/tmp/cc-fx",
+  "prompt_id": "307b94ef-4354-49f7-a83f-196865986236",
+  "hook_event_name": "Notification",
+  "message": "Claude is waiting for your input",
+  "notification_type": "idle_prompt"
+}

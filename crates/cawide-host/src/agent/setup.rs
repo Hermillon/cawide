@@ -5,17 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use toml_edit::{value, Array, DocumentMut, Item, Table};
 
-const CLAUDE_EVENTS: &[&str] = &[
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PermissionRequest",
-    "Notification",
-    "Stop",
-    "SessionEnd",
-];
-
 const CODEX_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -211,14 +200,63 @@ fn update_json_hooks(
     Ok(())
 }
 
-fn setup_claude(home: &Path, abs_exe: &Path, remove: bool) -> anyhow::Result<String> {
-    let settings_path = home.join(".claude/settings.json");
-    update_json_hooks(&settings_path, abs_exe, "claude", CLAUDE_EVENTS, remove)?;
-    if remove {
-        Ok("Claude Code hooks removed from settings.json".into())
-    } else {
-        Ok("Claude Code hooks configured in settings.json".into())
+fn is_legacy_claude_hook_group(group: &serde_json::Value) -> bool {
+    let Some(hooks_arr) = group.get("hooks").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    hooks_arr.iter().any(|hook| {
+        hook.get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|cmd| cmd.contains(" hook claude --event "))
+    })
+}
+
+/// Removes legacy `" hook claude --event "` hook groups from `~/.claude/settings.json`
+/// without creating a `.cawide-bak` backup. Returns `Ok(true)` only if the file was modified.
+pub fn remove_legacy_claude_hooks(settings_path: &Path) -> anyhow::Result<bool> {
+    if !settings_path.exists() {
+        return Ok(false);
     }
+    let content = std::fs::read_to_string(settings_path)
+        .with_context(|| format!("reading {}", settings_path.display()))?;
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing {}: invalid JSON", settings_path.display()))?;
+    let Some(root_obj) = root.as_object_mut() else {
+        return Ok(false);
+    };
+    let Some(hooks_obj) = root_obj.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
+        return Ok(false);
+    };
+
+    let mut modified = false;
+    let mut empty_events = Vec::new();
+    for (event, val) in hooks_obj.iter_mut() {
+        let Some(groups) = val.as_array_mut() else {
+            continue;
+        };
+        let orig_len = groups.len();
+        groups.retain(|g| !is_legacy_claude_hook_group(g));
+        if groups.len() != orig_len {
+            modified = true;
+            if groups.is_empty() {
+                empty_events.push(event.clone());
+            }
+        }
+    }
+    for event in empty_events {
+        hooks_obj.remove(&event);
+    }
+    if modified && hooks_obj.is_empty() {
+        root_obj.remove("hooks");
+    }
+    if !modified {
+        return Ok(false);
+    }
+
+    let mut formatted = serde_json::to_string_pretty(&root)?;
+    formatted.push('\n');
+    atomic_write(settings_path, formatted.as_bytes())?;
+    Ok(true)
 }
 
 fn is_our_codex_notify(item: &Item) -> bool {
@@ -672,7 +710,15 @@ pub fn run_setup(home: &Path, exe: &Path, agent: &str, remove: bool) -> anyhow::
     };
 
     match agent {
-        "claude" => setup_claude(home, &abs_exe, remove),
+        "claude" => {
+            let settings_path = home.join(".claude/settings.json");
+            let cleaned = remove_legacy_claude_hooks(&settings_path).unwrap_or(false);
+            if cleaned {
+                Ok("Claude Code requires no global setup (managed via Cawide launcher). Cleaned legacy hooks from settings.json.".into())
+            } else {
+                Ok("Claude Code requires no global setup (managed via Cawide launcher).".into())
+            }
+        }
         "codex" => setup_codex(home, &abs_exe, remove),
         "omp" => setup_omp(home, &abs_exe, remove),
         "opencode" => setup_opencode(home, &abs_exe, remove),
@@ -683,9 +729,10 @@ pub fn run_setup(home: &Path, exe: &Path, agent: &str, remove: bool) -> anyhow::
 }
 
 pub fn auto_setup_all(home: &Path, exe: &Path) -> std::io::Result<()> {
-    if home.join(".claude").exists() {
-        if let Err(e) = run_setup(home, exe, "claude", false) {
-            tracing::warn!("Auto-setup for claude failed: {e}");
+    let claude_settings = home.join(".claude/settings.json");
+    if claude_settings.exists() {
+        if let Err(e) = remove_legacy_claude_hooks(&claude_settings) {
+            tracing::warn!("Failed to clean legacy claude hooks: {e}");
         }
     }
     if home.join(".codex").exists() {
@@ -704,4 +751,126 @@ pub fn auto_setup_all(home: &Path, exe: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_legacy_claude_hooks;
+
+    #[test]
+    fn remove_legacy_claude_hooks_cleans_legacy_and_preserves_user_hooks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings = tmp.path().join("settings.json");
+        let initial = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "SessionStart": [
+                    { "hooks": [{ "type": "command", "command": "/usr/local/bin/cawide hook claude --event SessionStart" }] },
+                    { "hooks": [{ "type": "command", "command": "echo user-start" }] }
+                ],
+                "Stop": [
+                    { "hooks": [{ "type": "command", "command": "'/opt/cawide' hook claude --event Stop" }] }
+                ]
+            }
+        });
+        std::fs::write(&settings, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
+
+        let changed = remove_legacy_claude_hooks(&settings).expect("remove_legacy_claude_hooks");
+        assert!(changed);
+        assert!(!tmp.path().join("settings.json.cawide-bak").exists());
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(parsed["theme"], "dark");
+        let start = parsed["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(start.len(), 1);
+        assert_eq!(start[0]["hooks"][0]["command"], "echo user-start");
+        assert!(parsed["hooks"].get("Stop").is_none());
+
+        // Removing the remaining legacy-only file drops the empty "hooks" object too.
+        let only_legacy = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "PreToolUse": [
+                    { "hooks": [{ "type": "command", "command": "cawide hook claude --event PreToolUse" }] }
+                ]
+            }
+        });
+        std::fs::write(
+            &settings,
+            serde_json::to_string_pretty(&only_legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(remove_legacy_claude_hooks(&settings).unwrap());
+        let parsed2: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(parsed2, serde_json::json!({ "theme": "dark" }));
+    }
+
+    #[test]
+    fn remove_legacy_claude_hooks_does_not_rewrite_unchanged_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings = tmp.path().join("settings.json");
+        let initial = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "SessionStart": [
+                    { "hooks": [{ "type": "command", "command": "echo custom" }] }
+                ]
+            }
+        });
+        let raw = serde_json::to_string_pretty(&initial).unwrap();
+        std::fs::write(&settings, &raw).unwrap();
+
+        #[cfg(unix)]
+        let before_ino = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&settings).unwrap().ino()
+        };
+
+        let changed = remove_legacy_claude_hooks(&settings).expect("remove_legacy_claude_hooks");
+        assert!(!changed);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), raw);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let after_ino = std::fs::metadata(&settings).unwrap().ino();
+            assert_eq!(
+                before_ino, after_ino,
+                "unchanged file must not be rewritten"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remove_legacy_claude_hooks_cleans_through_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("dotfiles-claude-settings.json");
+        let link = tmp.path().join("settings.json");
+        let initial = serde_json::json!({
+            "model": "sonnet",
+            "hooks": {
+                "Stop": [
+                    { "hooks": [{ "type": "command", "command": "/usr/bin/cawide hook claude --event Stop" }] }
+                ]
+            }
+        });
+        std::fs::write(&target, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let changed = remove_legacy_claude_hooks(&link).expect("remove_legacy_claude_hooks");
+        assert!(changed);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "settings.json must remain a symlink"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "model": "sonnet" }));
+    }
 }

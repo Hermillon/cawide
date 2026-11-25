@@ -1,0 +1,40 @@
+
+  ⎿  PostToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ Fetch(https://example.com)
+  ⎿  PreToolUse:WebFetch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+     Exit 127, likely a missing program: The check may not have run. See /hooks.
+  ⎿  Received 577 bytes (200 OK)
+  ⎿  PostToolUse:WebFetch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ The page title/headline returned by WebFetch for https://example.com is Example Domain.
+
+⏺ Ran 2 stop hooks
+  ⎿  Stop hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+✻ Baked for 20s · done 9:54 PM
+
+❯ Use the AskUserQuestion tool to ask me one question "Pick a color?" with options Red, Green, Blue. Then reply with
+  the answer.
+  ⎿  UserPromptSubmit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Pick a color?
+
+❯ 1. Red
+     Select the color Red
+  2. Green
+     Select the color Green
+  3. Blue
+     Select the color Blue
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
