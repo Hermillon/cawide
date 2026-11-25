@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-11-25
+
+### Fixed
+- Removed `extract_text_question` heuristic guessing on OMP `agent_end` so completed turns always transition cleanly to `Completed` without false `WaitingForInput` prompts.
+- Guarded OMP `cawide.js` (`isMain`) against non-interactive runs (`ctx?.hasUI === false`) and added `tool_execution_end` cleanup so blocked/denied tool calls do not leave stale attention prompts.
+- Cleared stale non-`Plan` attention items on `TurnOutcome::Started` and mapped `OSC 7501` `kind=permission` to `AttentionKind::Approval`.
+
 ## [0.15.1] - 2026-11-25
 
 ### Changed
