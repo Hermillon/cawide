@@ -48,8 +48,9 @@ fn test_shims_generation() {
     let claude_shim = bin_dir.join("claude");
     assert!(claude_shim.is_file());
     let claude_content = std::fs::read_to_string(&claude_shim).expect("read claude");
-    assert!(claude_content.contains("setup claude"));
-
+    assert!(!claude_content.contains("setup claude"));
+    assert!(claude_content.contains("CAWIDE_CLAUDE_SHIM_PID"));
+    assert!(claude_content.contains("--settings"));
     let omp_shim = bin_dir.join("omp");
     assert!(omp_shim.is_file());
     let omp_content = std::fs::read_to_string(&omp_shim).expect("read omp");
@@ -544,5 +545,222 @@ fi
     assert!(
         custom_combined.contains(&format!("CUSTOM_SHELL_ZDOTDIR:{expected_custom}")),
         "Custom ZDOTDIR must be preserved in shell, got:\n{custom_combined}"
+    );
+}
+
+#[test]
+fn test_claude_settings_json_generation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path();
+    cawide_host::net::shims::ensure_shims(config_dir).expect("ensure_shims");
+
+    let settings_path = cawide_host::net::shims::claude_settings_path(config_dir);
+    assert_eq!(
+        settings_path,
+        config_dir.join("agents").join("claude-settings.json")
+    );
+    assert!(settings_path.is_file());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&settings_path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "claude-settings.json must be 0o600");
+    }
+
+    let raw = std::fs::read_to_string(&settings_path).expect("read claude-settings.json");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+    let hooks = parsed["hooks"].as_object().expect("hooks object");
+
+    let expected_events = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PermissionDenied",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Notification",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+        "Stop",
+        "StopFailure",
+        "SessionEnd",
+    ];
+    assert_eq!(hooks.len(), expected_events.len());
+    for event in expected_events {
+        let entries = hooks
+            .get(event)
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("missing event {event}"));
+        assert_eq!(entries.len(), 1);
+        let inner = entries[0]["hooks"].as_array().expect("inner hooks array");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0]["type"], "command");
+        assert_eq!(
+            inner[0]["command"],
+            "\"$CAWIDE_BIN_DIR/cawide\" hook claude"
+        );
+        let expected_timeout = if event == "PermissionRequest" {
+            86_400
+        } else {
+            600
+        };
+        assert_eq!(inner[0]["timeout"], expected_timeout);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_claude_shim_loop_guard() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config_dir = tmp.path().join("cfg");
+    let bin_dir = cawide_host::net::shims::ensure_shims(&config_dir).expect("ensure_shims");
+
+    let loop_dir = tmp.path().join("loop_bin");
+    std::fs::create_dir_all(&loop_dir).expect("create loop_dir");
+    let loop_claude = loop_dir.join("claude");
+    std::fs::write(&loop_claude, "#!/bin/sh\nexec claude \"$@\"\n").expect("write loop wrapper");
+    std::fs::set_permissions(&loop_claude, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod loop wrapper");
+
+    let path_env = std::env::join_paths([&bin_dir, &loop_dir]).expect("join_paths");
+    let start = std::time::Instant::now();
+    let output = std::process::Command::new(bin_dir.join("claude"))
+        .arg("--version")
+        .env("PATH", &path_env)
+        .env_remove("CAWIDE_CLAUDE_SHIM_PID")
+        .env_remove("CAWIDE_CLAUDE_OWNER")
+        .output()
+        .expect("run claude shim");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "loop guard took too long: {elapsed:?}"
+    );
+    assert_eq!(output.status.code(), Some(127));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cawide: `claude` resolves back to Cawide's launcher through another wrapper on PATH; install Claude Code (npm i -g @anthropic-ai/claude-code)"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_claude_shim_passthrough_interactive_and_missing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Include a space and single quote in config_dir to verify POSIX quoting.
+    let config_dir = tmp.path().join("cfg 'dir");
+    let bin_dir = cawide_host::net::shims::ensure_shims(&config_dir).expect("ensure_shims");
+    let settings_path = cawide_host::net::shims::claude_settings_path(&config_dir);
+
+    // 1. Missing real claude -> exit 127
+    let empty_dir = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty_dir).expect("empty_dir");
+    let missing_out = std::process::Command::new(bin_dir.join("claude"))
+        .env(
+            "PATH",
+            std::env::join_paths([&bin_dir, &empty_dir]).expect("join_paths"),
+        )
+        .env_remove("CAWIDE_CLAUDE_SHIM_PID")
+        .env_remove("CAWIDE_CLAUDE_OWNER")
+        .output()
+        .expect("run missing claude");
+    let missing_stderr = String::from_utf8_lossy(&missing_out.stderr);
+    assert_eq!(
+        missing_out.status.code(),
+        Some(127),
+        "stderr: {missing_stderr}"
+    );
+    assert!(
+        missing_stderr.contains("claude not found in PATH"),
+        "unexpected stderr: {missing_stderr}"
+    );
+
+    // Fake real claude that records OWNER and each arg on its own line
+    let real_dir = tmp.path().join("real_bin");
+    std::fs::create_dir_all(&real_dir).expect("real_dir");
+    let real_claude = real_dir.join("claude");
+    let log_file = tmp.path().join("real_claude.log");
+    let script = format!(
+        "#!/bin/sh\n: > \"{}\"\nprintf 'OWNER=%s\\n' \"${{CAWIDE_CLAUDE_OWNER:-}}\" >> \"{}\"\nfor a in \"$@\"; do\n    printf 'ARG:%s\\n' \"$a\" >> \"{}\"\ndone\n",
+        log_file.display(),
+        log_file.display(),
+        log_file.display()
+    );
+    std::fs::write(&real_claude, script).expect("write fake real claude");
+    std::fs::set_permissions(&real_claude, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake real claude");
+
+    let path_env = std::env::join_paths([&bin_dir, &real_dir]).expect("join_paths");
+
+    let run_shim = |args: &[&str], owner: Option<&str>| -> String {
+        let mut cmd = std::process::Command::new(bin_dir.join("claude"));
+        cmd.args(args)
+            .env("PATH", &path_env)
+            .env_remove("CAWIDE_CLAUDE_SHIM_PID");
+        match owner {
+            Some(v) => {
+                cmd.env("CAWIDE_CLAUDE_OWNER", v);
+            }
+            None => {
+                cmd.env_remove("CAWIDE_CLAUDE_OWNER");
+            }
+        }
+        let status = cmd.status().expect("run claude shim");
+        assert!(status.success(), "shim failed for args {args:?}");
+        std::fs::read_to_string(&log_file).expect("read log")
+    };
+
+    // 2. Nested CAWIDE_CLAUDE_OWNER=1 passthrough -> no --settings
+    let nested = run_shim(&["--resume", "abc"], Some("1"));
+    assert_eq!(nested, "OWNER=1\nARG:--resume\nARG:abc\n");
+
+    // 3. Passthrough flags/subcommands -> no --settings
+    for args in [
+        vec!["-p", "hello"],
+        vec!["--version"],
+        vec!["mcp", "list"],
+        vec!["foo", "-p"],
+        vec!["--settings", "/tmp/custom.json"],
+    ] {
+        let out = run_shim(&args, None);
+        assert!(
+            !out.contains(&settings_path.to_string_lossy().to_string()),
+            "unexpected --settings injection for {args:?}: {out}"
+        );
+        assert!(
+            out.starts_with("OWNER=\n"),
+            "passthrough should not set CAWIDE_CLAUDE_OWNER for {args:?}: {out}"
+        );
+    }
+
+    // 4. Interactive invocation (zero args)
+    let interactive_zero = run_shim(&[], None);
+    assert_eq!(
+        interactive_zero,
+        format!("OWNER=1\nARG:--settings\nARG:{}\n", settings_path.display())
+    );
+
+    // 5. Interactive invocation with args (including spaces and empty arg)
+    let interactive_args = run_shim(&["hello world", "", "--model", "sonnet"], None);
+    assert_eq!(
+        interactive_args,
+        format!(
+            "OWNER=1\nARG:--settings\nARG:{}\nARG:hello world\nARG:\nARG:--model\nARG:sonnet\n",
+            settings_path.display()
+        )
     );
 }

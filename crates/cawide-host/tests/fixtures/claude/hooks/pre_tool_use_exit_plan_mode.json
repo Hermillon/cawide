@@ -1,0 +1,17 @@
+{
+  "session_id": "ea7c238f-c0c8-4054-a53d-788a66ecd478",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-fx/ea7c238f-c0c8-4054-a53d-788a66ecd478.jsonl",
+  "cwd": "/private/tmp/cc-fx",
+  "prompt_id": "c307e20a-4e0e-478f-bfbf-efcd395b7ec6",
+  "permission_mode": "plan",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "ExitPlanMode",
+  "tool_input": {
+    "plan": "## Context\nCreate `/tmp/cc-fx/plan.txt` containing `hi`.\n\n## Steps\n1. Use the `Write` tool to create `/tmp/cc-fx/plan.txt` with content `hi`.\n2. Verify `/tmp/cc-fx/plan.txt` exists and contains `hi` using the `Read` tool.\n",
+    "planFilePath": "/Users/dev/.claude/plans/make-a-2-step-plan-glowing-hoare.md"
+  },
+  "tool_use_id": "call_5151771725678009000"
+}

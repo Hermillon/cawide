@@ -76,6 +76,7 @@ struct Tracked {
     last_osc_seq: u64,
     pending_outcome: TurnOutcome,
     completed_attention: Option<Attention>,
+    status_before_attention: Option<AgentStatus>,
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +99,93 @@ impl AgentTracker {
 
     pub fn turn_started_at(&self) -> Option<u64> {
         self.tracked.as_ref().and_then(|t| t.turn_started_at)
+    }
+    pub fn attention_keys(&self) -> Vec<String> {
+        self.tracked
+            .as_ref()
+            .map(|t| {
+                t.attention_queue
+                    .iter()
+                    .filter_map(|a| a.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn resolve_keys(&mut self, keys: &[String], now_secs: u64, now_ms: u64) -> TrackerResult {
+        let old_state = self.current();
+        let old_head_id = self
+            .tracked
+            .as_ref()
+            .and_then(|t| t.attention_queue.front().map(|a| a.id));
+        let old_turn_started_at = self.tracked.as_ref().and_then(|t| t.turn_started_at);
+
+        let Some(t) = &mut self.tracked else {
+            return TrackerResult::default();
+        };
+
+        let initial_len = t.attention_queue.len();
+        t.attention_queue.retain(|a| {
+            !a.key
+                .as_deref()
+                .is_some_and(|k| keys.iter().any(|x| x == k))
+        });
+
+        if t.attention_queue.len() == initial_len {
+            return TrackerResult::default();
+        }
+
+        if let Some(head) = t.attention_queue.front() {
+            let next_status = AgentStatus::WaitingForInput {
+                prompt: head.prompt.clone(),
+                options: head.options.clone(),
+            };
+            if t.state.status != next_status {
+                t.state.status = next_status;
+                t.state.updated_ts = now_secs;
+            }
+            t.completed_attention = None;
+        } else {
+            let restored = t
+                .status_before_attention
+                .take()
+                .unwrap_or(AgentStatus::Idle);
+            t.state.status = restored;
+            t.state.updated_ts = now_secs;
+            match &t.state.status {
+                AgentStatus::Completed { summary } => {
+                    t.completed_attention = Some(Attention {
+                        id: next_attention_id(),
+                        key: None,
+                        kind: AttentionKind::TextQuestion,
+                        opened_at_ms: now_ms,
+                        prompt: summary.clone(),
+                        options: Vec::new(),
+                        actionable: true,
+                    });
+                    t.turn_started_at = None;
+                }
+                AgentStatus::Thinking { .. } => {
+                    t.completed_attention = None;
+                    t.turn_started_at.get_or_insert(now_secs);
+                }
+                AgentStatus::Idle => {
+                    t.completed_attention = None;
+                    t.turn_started_at = None;
+                }
+                AgentStatus::WaitingForInput { .. } => {
+                    t.completed_attention = None;
+                }
+            }
+        }
+
+        self.finish_transition(
+            old_state,
+            old_head_id,
+            old_turn_started_at,
+            &TurnOutcome::None,
+            now_secs,
+        )
     }
 
     pub fn on_probe(&mut self, fg: Option<Foreground>, progress_active: bool, now: u64) -> bool {
@@ -180,6 +268,7 @@ impl AgentTracker {
                             last_osc_seq: 0,
                             pending_outcome: TurnOutcome::None,
                             completed_attention: None,
+                            status_before_attention: None,
                         });
                     }
                 }
@@ -308,6 +397,7 @@ impl AgentTracker {
                 t.last_epoch = None;
                 t.last_seq = None;
                 t.pending_outcome = TurnOutcome::None;
+                t.status_before_attention = None;
                 t.shell_since = None;
             }
             if let Some(epoch) = signal.epoch {
@@ -348,6 +438,7 @@ impl AgentTracker {
                 last_osc_seq: 0,
                 pending_outcome: TurnOutcome::None,
                 completed_attention: None,
+                status_before_attention: None,
             });
         }
 
@@ -380,9 +471,19 @@ impl AgentTracker {
             SignalResolution::ClearAll => {
                 t.attention_queue.clear();
             }
+            SignalResolution::ByKeys(keys) => {
+                t.attention_queue.retain(|a| {
+                    !a.key
+                        .as_deref()
+                        .is_some_and(|k| keys.iter().any(|x| x == k))
+                });
+            }
         }
 
         if let Some(spec) = signal.attention {
+            if t.attention_queue.is_empty() && t.status_before_attention.is_none() {
+                t.status_before_attention = Some(t.state.status.clone());
+            }
             let existing_pos = if let Some(k) = spec.key.as_ref() {
                 t.attention_queue
                     .iter()
@@ -453,6 +554,7 @@ impl AgentTracker {
                 t.turn_started_at = None;
             }
         } else {
+            t.status_before_attention = None;
             let status_changed = t.state.status != signal.status || old_state.is_none();
             if status_changed {
                 t.state.status = signal.status.clone();
@@ -1496,12 +1598,12 @@ mod tests {
     fn test_legacy_approval_cleared_by_post_tool_use() {
         let mut tracker = AgentTracker::default();
         let perm = crate::agent::map::map_signal(
-            "claude",
+            "codex",
             Some("PermissionRequest"),
             &serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
         )
         .unwrap();
-        let r1 = tracker.on_hook_signal("claude", perm, 100, 100_000, 0);
+        let r1 = tracker.on_hook_signal("codex", perm, 100, 100_000, 0);
         assert!(r1.changed);
         assert!(matches!(
             tracker.current().unwrap().status,
@@ -1509,9 +1611,9 @@ mod tests {
         ));
 
         let post =
-            crate::agent::map::map_signal("claude", Some("PostToolUse"), &serde_json::json!({}))
+            crate::agent::map::map_signal("codex", Some("PostToolUse"), &serde_json::json!({}))
                 .unwrap();
-        let r2 = tracker.on_hook_signal("claude", post, 101, 101_000, 0);
+        let r2 = tracker.on_hook_signal("codex", post, 101, 101_000, 0);
         assert!(r2.changed);
         assert!(matches!(
             tracker.current().unwrap().status,
@@ -1839,5 +1941,59 @@ mod tests {
         let head = osc_tracker.head_attention().unwrap();
         assert_eq!(head.kind, AttentionKind::Approval);
         assert_eq!(head.options, vec!["Allow".to_string(), "Deny".to_string()]);
+    }
+    #[test]
+    fn test_claude_plan_attention_cleared_on_stop() {
+        let mut tracker = AgentTracker::default();
+
+        // 1. Plan attention arrives
+        let plan_sig = AgentSignal {
+            status: AgentStatus::WaitingForInput {
+                prompt: "Approve plan?".into(),
+                options: vec!["Approve".into(), "Deny".into()],
+            },
+            attention: Some(AttentionSpec {
+                key: Some("perm-1".into()),
+                kind: AttentionKind::Plan {
+                    review_id: "perm-1".into(),
+                    option_ids: vec!["approve".into(), "deny".into()],
+                },
+                prompt: "Approve plan?".into(),
+                options: vec!["Approve".into(), "Deny".into()],
+                actionable: true,
+            }),
+            outcome: TurnOutcome::None,
+            resolution: SignalResolution::None,
+            seq: None,
+            epoch: None,
+        };
+        tracker.on_hook_signal("claude", plan_sig, 10, 10_000, 0);
+        assert!(tracker.head_attention().is_some());
+        assert_eq!(tracker.attention_keys(), vec!["perm-1".to_string()]);
+
+        // 2. Claude Stop sends ClearAll -> Plan attention must be cleared
+        let stop_sig = AgentSignal {
+            status: AgentStatus::Completed {
+                summary: "Done".into(),
+            },
+            attention: None,
+            outcome: TurnOutcome::Done,
+            resolution: SignalResolution::ClearAll,
+            seq: None,
+            epoch: None,
+        };
+        tracker.on_hook_signal("claude", stop_sig, 15, 15_000, 0);
+        assert!(
+            tracker.head_attention().is_none()
+                || matches!(
+                    tracker.head_attention().unwrap().kind,
+                    AttentionKind::TextQuestion
+                ),
+            "Plan attention must be cleared on Claude Stop"
+        );
+        assert!(
+            tracker.attention_keys().is_empty(),
+            "Queue keys must be empty"
+        );
     }
 }

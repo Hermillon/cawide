@@ -1,0 +1,23 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "0913e41a-9ada-437c-82f0-f96172eb00e9",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Launched the `Explore` subagent to list the files in `/tmp/cc-w2-DQ6UiH`; waiting for its results.",
+  "background_tasks": [
+    {
+      "id": "a55007b4ac21d72a1",
+      "type": "subagent",
+      "status": "running",
+      "description": "List files in /tmp/cc-w2-DQ6UiH",
+      "agent_type": "Explore"
+    }
+  ],
+  "session_crons": []
+}

@@ -97,7 +97,7 @@ gh attestation verify cawide-<target>.tar.gz --repo Hermillon/cawide
 | `cawide devices` | List authorized paired devices and their node IDs |
 | `cawide revoke <id>` | Revoke an authorized device by key or name |
 | `cawide open <port|url>` | Open a localhost port or URL in the Cawide browser on your connected phone |
-| `cawide setup <agent>` | Install shell integration hooks for an agent (`claude`, `codex`, `omp`, `opencode`) |
+| `cawide setup <agent>` | Install shell integration hooks for an agent (`codex`, `omp`, `opencode`; `claude` works automatically via launcher shim) |
 | `cawide hook <agent>` | Emit an agent event or lifecycle state to the daemon |
 | `cawide login` | Link this computer to your Cawide account |
 | `cawide logout` | Unlink this computer from your Cawide account |

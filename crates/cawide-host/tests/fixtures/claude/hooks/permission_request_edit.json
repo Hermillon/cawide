@@ -1,0 +1,25 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "875387d7-d62a-4a78-bef8-17ce94416204",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/tmp/cc-w2-DQ6UiH/sample.txt",
+    "old_string": "hello world",
+    "new_string": "hello cawide",
+    "replace_all": false
+  },
+  "permission_suggestions": [
+    {
+      "type": "setMode",
+      "mode": "acceptEdits",
+      "destination": "session"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 //! Agent telemetry, event mapping, hooks, and shell setup (Brick 7).
 
+pub mod claude;
 pub mod detect;
 pub mod hook;
 pub mod map;

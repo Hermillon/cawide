@@ -1,0 +1,29 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "179e5717-6ae8-4249-9923-1b399a9d1c34",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "WebFetch",
+  "tool_input": {
+    "url": "https://example.com",
+    "prompt": "What is the page title?"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addRules",
+      "destination": "localSettings",
+      "rules": [
+        {
+          "toolName": "WebFetch",
+          "ruleContent": "domain:example.com"
+        }
+      ],
+      "behavior": "allow"
+    }
+  ]
+}

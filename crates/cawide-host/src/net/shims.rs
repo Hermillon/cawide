@@ -177,18 +177,51 @@ fi
 exec "$REAL_BIN" --enable hooks --dangerously-bypass-hook-trust "$@"
 "#;
 
-pub const CLAUDE_SCRIPT: &str = r#"#!/bin/sh
-BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-if [ -x "$BIN_DIR/cawide" ]; then
-    "$BIN_DIR/cawide" setup claude >/dev/null 2>&1 || true
-elif command -v cawide >/dev/null 2>&1; then
-    cawide setup claude >/dev/null 2>&1 || true
-fi
+const CLAUDE_HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PermissionDenied",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Notification",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+];
 
+pub fn claude_settings_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("agents").join("claude-settings.json")
+}
+
+fn posix_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+pub fn claude_script(config_dir: &Path) -> String {
+    let settings_path = claude_settings_path(config_dir);
+    let quoted_settings = posix_single_quote(&settings_path.to_string_lossy());
+    format!(
+        r#"#!/bin/sh
+if [ "${{CAWIDE_CLAUDE_SHIM_PID:-}}" = "$$" ]; then
+    printf '%s\n' 'cawide: `claude` resolves back to Cawide'\''s launcher through another wrapper on PATH; install Claude Code (npm i -g @anthropic-ai/claude-code)' >&2
+    exit 127
+fi
+export CAWIDE_CLAUDE_SHIM_PID="$$"
+
+_self_dir="${{0%/*}}"
+[ "$_self_dir" = "$0" ] && _self_dir="."
+[ -z "$_self_dir" ] && _self_dir="/"
+BIN_DIR="$(CDPATH= cd -- "$_self_dir" && pwd)"
 REAL_BIN=""
 IFS=':'
 for p in $PATH; do
-    if [ "$p" != "$BIN_DIR" ] && [ -x "$p/claude" ] && [ ! "$p/claude" -ef "$BIN_DIR/claude" ]; then
+    if [ -n "$p" ] && [ "$p" != "$BIN_DIR" ] && [ -x "$p/claude" ] && [ ! "$p/claude" -ef "$BIN_DIR/claude" ]; then
         REAL_BIN="$p/claude"
         break
     fi
@@ -200,8 +233,82 @@ if [ -z "$REAL_BIN" ]; then
     exit 127
 fi
 
-exec "$REAL_BIN" "$@"
-"#;
+PASSTHROUGH=0
+if [ -n "${{CAWIDE_CLAUDE_OWNER:-}}" ]; then
+    PASSTHROUGH=1
+else
+    case "${{1:-}}" in
+        -p|--print|-v|--version|-h|--help|update|upgrade|install|mcp|config|doctor|setup-token|plugin|migrate-installer)
+            PASSTHROUGH=1
+            ;;
+    esac
+    if [ "$PASSTHROUGH" -eq 0 ]; then
+        for arg in "$@"; do
+            case "$arg" in
+                -p|--print|--settings|--settings=*)
+                    PASSTHROUGH=1
+                    break
+                    ;;
+            esac
+        done
+    fi
+fi
+
+if [ "$PASSTHROUGH" -eq 1 ]; then
+    exec "$REAL_BIN" "$@"
+fi
+
+export CAWIDE_CLAUDE_OWNER=1
+exec "$REAL_BIN" --settings {quoted_settings} "$@"
+"#
+    )
+}
+
+fn write_private_atomic(path: &Path, content: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    use std::io::Write;
+    temp.write_all(content)?;
+    temp.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    temp.persist(path)
+        .map_err(|e| anyhow::anyhow!("failed to persist {}: {}", path.display(), e.error))?;
+    Ok(())
+}
+
+fn write_claude_settings(config_dir: &Path) -> anyhow::Result<PathBuf> {
+    let mut hooks = serde_json::Map::new();
+    for &event in CLAUDE_HOOK_EVENTS {
+        let timeout = if event == "PermissionRequest" {
+            86_400
+        } else {
+            600
+        };
+        hooks.insert(
+            event.to_string(),
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": "\"$CAWIDE_BIN_DIR/cawide\" hook claude",
+                    "timeout": timeout
+                }]
+            }]),
+        );
+    }
+    let payload = serde_json::json!({ "hooks": hooks });
+    let bytes = serde_json::to_vec_pretty(&payload)?;
+    let path = claude_settings_path(config_dir);
+    write_private_atomic(&path, &bytes)?;
+    Ok(path)
+}
 
 pub const OMP_SCRIPT: &str = r#"#!/bin/sh
 BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -336,7 +443,8 @@ pub fn ensure_shims(config_dir: &Path) -> anyhow::Result<PathBuf> {
     write_executable(&bin_dir.join("open"), OPEN_SCRIPT)?;
     write_executable(&bin_dir.join("xdg-open"), XDG_OPEN_SCRIPT)?;
     write_executable(&bin_dir.join("codex"), CODEX_SCRIPT)?;
-    write_executable(&bin_dir.join("claude"), CLAUDE_SCRIPT)?;
+    write_claude_settings(config_dir)?;
+    write_executable(&bin_dir.join("claude"), &claude_script(config_dir))?;
     write_executable(&bin_dir.join("omp"), OMP_SCRIPT)?;
     write_executable(&bin_dir.join("opencode"), OPENCODE_SCRIPT)?;
 

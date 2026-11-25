@@ -601,7 +601,7 @@ fn test_5_apply_roundtrip_linux_target() {
 
     // Cawide hooks re-installed
     let settings_str = fs::read_to_string(target_home.join(".claude/settings.json")).unwrap();
-    assert!(settings_str.contains(" hook claude"));
+    assert!(!settings_str.contains(" hook claude"));
     assert!(target_home
         .join(".omp/agent/extensions/cawide.js")
         .is_file());
@@ -857,10 +857,12 @@ fn test_10_symlinked_ancestor() {
     let cfg = target_home.join(".config/cawide");
     let exe = fixture_exe(tmp.path());
 
-    // Symlink .claude to outside_dir
+    // Symlink .claude and .codex to outside_dir
     #[cfg(unix)]
-    std::os::unix::fs::symlink(outside_dir.path(), target_home.join(".claude")).unwrap();
-
+    {
+        std::os::unix::fs::symlink(outside_dir.path(), target_home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), target_home.join(".codex")).unwrap();
+    }
     let tmp_src = tempfile::tempdir().unwrap();
     let env = fixture_home(tmp_src.path());
     let collected = collect_profile(&env, &NoSecretStore, &exe).unwrap();
@@ -879,7 +881,7 @@ fn test_10_symlinked_ancestor() {
     assert!(report
         .notices
         .iter()
-        .any(|n| n.contains("skipped Cawide hooks for claude")));
+        .any(|n| n.contains("skipped Cawide hooks for codex")));
 }
 
 #[test]

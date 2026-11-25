@@ -1,0 +1,8 @@
+{
+  "session_id": "de7a2a28-f6d7-4e5e-8e9b-09c816ec5528",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-w2-DQ6UiH/de7a2a28-f6d7-4e5e-8e9b-09c816ec5528.jsonl",
+  "cwd": "/private/tmp/cc-w2-DQ6UiH",
+  "prompt_id": "405ef5d8-5a13-4ed5-b9f5-f07911c4fd50",
+  "hook_event_name": "SessionEnd",
+  "reason": "prompt_input_exit"
+}

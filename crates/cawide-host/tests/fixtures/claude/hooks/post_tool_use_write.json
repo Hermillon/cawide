@@ -1,0 +1,26 @@
+{
+  "session_id": "ea7c238f-c0c8-4054-a53d-788a66ecd478",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-fx/ea7c238f-c0c8-4054-a53d-788a66ecd478.jsonl",
+  "cwd": "/private/tmp/cc-fx",
+  "prompt_id": "c307e20a-4e0e-478f-bfbf-efcd395b7ec6",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/tmp/cc-fx/plan.txt",
+    "content": "hi\n"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "/tmp/cc-fx/plan.txt",
+    "content": "hi\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+  },
+  "tool_use_id": "call_13076200003776771996",
+  "duration_ms": 25
+}

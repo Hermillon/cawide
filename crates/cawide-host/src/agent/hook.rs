@@ -17,7 +17,7 @@ struct SyncStdoutGuard {
 impl SyncStdoutGuard {
     fn new(agent: &str) -> Self {
         Self {
-            need_flush: agent == "codex" || agent == "claude",
+            need_flush: agent == "codex",
         }
     }
 
