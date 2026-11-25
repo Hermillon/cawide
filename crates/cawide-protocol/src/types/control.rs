@@ -30,6 +30,18 @@ pub enum ControlMessage {
     },
     /// Host-initiated notification pushed to every open Control stream.
     HostEvent(HostEvent),
+    PairManagedRequest {
+        pairing_secret: [u8; 32],
+        client_node_id: [u8; 32],
+        device_name: String,
+        account_id: String,
+        epoch: u64,
+        nonce: [u8; 32],
+    },
+    PairManagedResponse {
+        result: Result<Vec<u8>, String>,
+        host_name: Option<String>,
+    },
 }
 
 /// Host state changes that clients should react to (e.g. refresh Git views).

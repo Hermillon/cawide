@@ -118,6 +118,19 @@ impl CloudClient {
         host_secret: &[u8; 32],
         node_id: &[u8; 32],
     ) -> anyhow::Result<ApiResponse> {
+        self.post_signed_with_bearer(path, body, host_secret, node_id, None)
+            .await
+    }
+
+    /// Signed host POST with an optional bearer token (used for per-channel push authorization).
+    pub async fn post_signed_with_bearer(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        host_secret: &[u8; 32],
+        node_id: &[u8; 32],
+        bearer: Option<&str>,
+    ) -> anyhow::Result<ApiResponse> {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -125,7 +138,7 @@ impl CloudClient {
         let msg = cawide_account::host_request_message("POST", path, ts, &body);
         let sig = cawide_account::sign(host_secret, &msg);
         let url = format!("{}{path}", self.base_url);
-        let req = self
+        let mut req = self
             .http
             .post(&url)
             .header(CONTENT_TYPE, "application/json")
@@ -133,6 +146,9 @@ impl CloudClient {
             .header(cawide_account::HEADER_TIMESTAMP, ts.to_string())
             .header(cawide_account::HEADER_SIGNATURE, hex::encode(sig))
             .body(body);
+        if let Some(token) = bearer {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
         self.send(req).await
     }
 

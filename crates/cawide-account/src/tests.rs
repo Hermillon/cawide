@@ -266,3 +266,258 @@ fn expand_trust_ignores_unconnected_links() {
     assert!(expand_trust(&mut trusted, &links, |_, _| true).is_empty());
     assert_eq!(trusted.len(), 1);
 }
+
+#[test]
+fn managed_claim_round_trip_and_halves_verify() {
+    let body = ManagedClaimBody {
+        account_id: ACCOUNT.into(),
+        host: public_key_of(&secret(1)),
+        claimer: public_key_of(&secret(2)),
+        epoch: 3,
+        nonce: [0x5au8; 32],
+        fresh_pair: true,
+    };
+    let host_sig = sign(&secret(1), &body.host_signing_message()).to_vec();
+    let claimer_sig = sign(&secret(2), &body.claimer_signing_message()).to_vec();
+
+    let proof = ManagedHostProof {
+        body: body.clone(),
+        host_sig: host_sig.clone(),
+    };
+    let decoded_proof = ManagedHostProof::from_bytes(&proof.to_bytes()).unwrap();
+    decoded_proof.verify().unwrap();
+    assert_eq!(decoded_proof, proof);
+
+    let claim = ManagedClaim {
+        body: body.clone(),
+        host_sig: host_sig.clone(),
+        claimer_sig: claimer_sig.clone(),
+    };
+    let decoded_claim = ManagedClaim::from_bytes(&claim.to_bytes()).unwrap();
+    decoded_claim.verify().unwrap();
+    assert_eq!(decoded_claim, claim);
+
+    // Tamper with epoch
+    let mut bad_epoch = claim.clone();
+    bad_epoch.body.epoch += 1;
+    assert_eq!(bad_epoch.verify(), Err(AccountError::BadSignature));
+
+    // Tamper with nonce
+    let mut bad_nonce = claim.clone();
+    bad_nonce.body.nonce[0] ^= 0x01;
+    assert_eq!(bad_nonce.verify(), Err(AccountError::BadSignature));
+
+    // Tamper with fresh_pair
+    let mut bad_fresh = claim.clone();
+    bad_fresh.body.fresh_pair = !bad_fresh.body.fresh_pair;
+    assert_eq!(bad_fresh.verify(), Err(AccountError::BadSignature));
+
+    // Tamper with signature
+    let mut bad_sig = claim.clone();
+    bad_sig.claimer_sig[0] ^= 0x01;
+    assert_eq!(bad_sig.verify(), Err(AccountError::BadSignature));
+
+    // Distinct signing contexts
+    let mut swapped = claim;
+    swapped.body.claimer = swapped.body.host;
+    swapped.claimer_sig = swapped.host_sig.clone();
+    assert_eq!(swapped.verify(), Err(AccountError::BadSignature));
+}
+
+fn session_registration() -> DeviceSessionRegistration {
+    DeviceSessionRegistration {
+        account_id: ACCOUNT.into(),
+        public_key: public_key_of(&secret(4)),
+        name: "Phone".into(),
+        platform: "iphone".into(),
+        issued_at: 1_700_000_100,
+        session_id: "sess-abc".into(),
+    }
+}
+
+#[test]
+fn device_session_registration_round_trip_and_signature() {
+    let reg = session_registration();
+    reg.validate().unwrap();
+    let decoded = DeviceSessionRegistration::from_bytes(&reg.to_bytes()).unwrap();
+    assert_eq!(decoded, reg);
+
+    // Signed by the device itself; the signature binds every field, including the session id.
+    let sig = sign(&secret(4), &reg.signing_message());
+    verify(&reg.public_key, &reg.signing_message(), &sig).unwrap();
+
+    let mut other_session = reg.clone();
+    other_session.session_id = "sess-xyz".into();
+    assert_eq!(
+        verify(&reg.public_key, &other_session.signing_message(), &sig),
+        Err(AccountError::BadSignature)
+    );
+}
+
+#[test]
+fn device_session_registration_validation_is_strict() {
+    let mut bad_platform = session_registration();
+    bad_platform.platform = "windows".into();
+    assert_eq!(
+        bad_platform.validate(),
+        Err(AccountError::Invalid("platform"))
+    );
+
+    let mut empty_session = session_registration();
+    empty_session.session_id.clear();
+    assert_eq!(
+        empty_session.validate(),
+        Err(AccountError::Invalid("session id"))
+    );
+
+    let mut long_session = session_registration();
+    long_session.session_id = "s".repeat(129);
+    assert_eq!(
+        long_session.validate(),
+        Err(AccountError::Invalid("session id"))
+    );
+
+    let mut bad_account = session_registration();
+    bad_account.account_id = "bad account".into();
+    assert_eq!(
+        bad_account.validate(),
+        Err(AccountError::Invalid("account id"))
+    );
+
+    let mut bad_name = session_registration();
+    bad_name.name = "  ".into();
+    assert_eq!(bad_name.validate(), Err(AccountError::Invalid("name")));
+
+    let mut ws_session = session_registration();
+    ws_session.session_id = "   ".into();
+    assert_eq!(
+        ws_session.validate(),
+        Err(AccountError::Invalid("session id"))
+    );
+
+    let mut ctrl_session = session_registration();
+    ctrl_session.session_id = "sess\n1".into();
+    assert_eq!(
+        ctrl_session.validate(),
+        Err(AccountError::Invalid("session id"))
+    );
+}
+
+#[test]
+fn managed_claim_body_is_context_separated_from_host_proof() {
+    let body = ManagedClaimBody {
+        account_id: ACCOUNT.into(),
+        host: public_key_of(&secret(1)),
+        claimer: public_key_of(&secret(2)),
+        epoch: 0,
+        nonce: [0x11u8; 32],
+        fresh_pair: false,
+    };
+    // A host signature over the claimer context must not verify as a host proof.
+    let claimer_sig = sign(&secret(2), &body.claimer_signing_message());
+    let forged = ManagedHostProof {
+        body: body.clone(),
+        host_sig: claimer_sig.to_vec(),
+    };
+    assert_eq!(forged.verify(), Err(AccountError::BadSignature));
+
+    // Wrong-length signature bytes are rejected as malformed signatures.
+    let short = ManagedHostProof {
+        body,
+        host_sig: vec![0u8; 63],
+    };
+    assert_eq!(short.verify(), Err(AccountError::BadSignature));
+
+    // Self-claim (host == claimer) is rejected even with valid signatures.
+    let self_body = ManagedClaimBody {
+        account_id: ACCOUNT.into(),
+        host: public_key_of(&secret(1)),
+        claimer: public_key_of(&secret(1)),
+        epoch: 0,
+        nonce: [0x22u8; 32],
+        fresh_pair: false,
+    };
+    let self_proof = ManagedHostProof {
+        body: self_body.clone(),
+        host_sig: sign(&secret(1), &self_body.host_signing_message()).to_vec(),
+    };
+    assert_eq!(self_proof.verify(), Err(AccountError::Invalid("claim")));
+    let self_claim = ManagedClaim {
+        body: self_body.clone(),
+        host_sig: self_proof.host_sig,
+        claimer_sig: sign(&secret(1), &self_body.claimer_signing_message()).to_vec(),
+    };
+    assert_eq!(self_claim.verify(), Err(AccountError::Invalid("claim")));
+}
+
+#[test]
+fn managed_host_proof_rejects_bad_account_id_and_trailing_bytes() {
+    let body = ManagedClaimBody {
+        account_id: "bad account".into(),
+        host: public_key_of(&secret(1)),
+        claimer: public_key_of(&secret(2)),
+        epoch: 1,
+        nonce: [0x22u8; 32],
+        fresh_pair: true,
+    };
+    let proof = ManagedHostProof {
+        body: body.clone(),
+        host_sig: sign(&secret(1), &body.host_signing_message()).to_vec(),
+    };
+    assert_eq!(proof.verify(), Err(AccountError::Invalid("account id")));
+
+    let good_body = ManagedClaimBody {
+        account_id: ACCOUNT.into(),
+        ..body
+    };
+    let good = ManagedHostProof {
+        host_sig: sign(&secret(1), &good_body.host_signing_message()).to_vec(),
+        body: good_body,
+    };
+    let mut bytes = good.to_bytes();
+    bytes.push(0);
+    assert_eq!(
+        ManagedHostProof::from_bytes(&bytes),
+        Err(AccountError::Malformed)
+    );
+}
+
+#[test]
+fn managed_host_unlink_request_json_round_trip() {
+    let req = ManagedHostUnlinkRequest {
+        account_id: ACCOUNT.into(),
+        epoch: 7,
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    let decoded: ManagedHostUnlinkRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, req);
+}
+#[test]
+fn managed_host_sync_response_serde_tagged_json() {
+    let active = ManagedHostSyncResponse::Active {
+        snapshot: HostTrustSnapshot {
+            version: 42,
+            account_id: "acct-1".into(),
+            locked: false,
+            devices: vec![],
+            links: vec![],
+            revoked: vec![],
+        },
+    };
+    let json_active = serde_json::to_string(&active).unwrap();
+    assert!(json_active.contains("\"status\":\"active\""));
+    let decoded_active: ManagedHostSyncResponse = serde_json::from_str(&json_active).unwrap();
+    assert_eq!(active, decoded_active);
+
+    let pending = ManagedHostSyncResponse::Pending;
+    let json_pending = serde_json::to_string(&pending).unwrap();
+    assert_eq!(json_pending, "{\"status\":\"pending\"}");
+    let decoded_pending: ManagedHostSyncResponse = serde_json::from_str(&json_pending).unwrap();
+    assert_eq!(pending, decoded_pending);
+
+    let removed = ManagedHostSyncResponse::Removed;
+    let json_removed = serde_json::to_string(&removed).unwrap();
+    assert_eq!(json_removed, "{\"status\":\"removed\"}");
+    let decoded_removed: ManagedHostSyncResponse = serde_json::from_str(&json_removed).unwrap();
+    assert_eq!(removed, decoded_removed);
+}

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.3] - 2026-11-25
+
+### Added
+- Managed account pairing (`PairManagedRequest`/`AccountAdopt`), 120 s authorization lease for account-managed hosts, and signed push producers carrying `host_epoch`.
+
+### Changed
+- Managed host removal revokes immediately and prunes push channels; legacy QR pairing (`PairRequest`) and `AccountClaim` are refused on managed hosts.
+
+### Fixed
+- Unmanaged pending-claim admission no longer gates locally paired keys on a snapshot lease.
+
 ## [0.15.2] - 2026-11-25
 
 ### Fixed

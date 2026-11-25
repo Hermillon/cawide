@@ -49,6 +49,50 @@ impl ConnectionTracker {
         count
     }
 
+    pub fn close_all_connections(&self, code: u32, reason: &[u8]) -> usize {
+        let all_conns: Vec<iroh::endpoint::Connection> = {
+            let mut conns = self.conns.lock();
+            let mut list = Vec::new();
+            for (_, pairs) in conns.drain() {
+                for (_, conn) in pairs {
+                    list.push(conn);
+                }
+            }
+            list
+        };
+        let count = all_conns.len();
+        let code = VarInt::from_u32(code);
+        for conn in all_conns {
+            conn.close(code, reason);
+        }
+        count
+    }
+
+    pub fn close_all_except(&self, except_conn_id: usize, code: u32, reason: &[u8]) -> usize {
+        let to_close: Vec<iroh::endpoint::Connection> = {
+            let mut conns = self.conns.lock();
+            let mut close_list = Vec::new();
+            conns.retain(|_, pairs| {
+                pairs.retain(|(id, conn)| {
+                    if *id == except_conn_id {
+                        true
+                    } else {
+                        close_list.push(conn.clone());
+                        false
+                    }
+                });
+                !pairs.is_empty()
+            });
+            close_list
+        };
+        let count = to_close.len();
+        let code = VarInt::from_u32(code);
+        for conn in to_close {
+            conn.close(code, reason);
+        }
+        count
+    }
+
     pub fn has_connections(&self) -> bool {
         !self.conns.lock().is_empty()
     }

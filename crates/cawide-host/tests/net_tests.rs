@@ -265,6 +265,103 @@ async fn pairing_rejects_wrong_secret_without_consuming_ticket() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn legacy_pair_request_rejected_on_managed_host() {
+    let (server, _tmp) = start_server().await;
+    server
+        .auth_store()
+        .begin_managed_pair([0x55; 32], "Existing".into(), "acct-1", 1, 0)
+        .unwrap();
+    let ticket = server
+        .pairing_manager()
+        .start_pairing(server.node_id(), None, Vec::new())
+        .unwrap();
+
+    let key = SecretKey::generate();
+    let node_id = *key.public().as_bytes();
+    let ep = client(key).await;
+    let conn = connect(&ep, &server, ALPN_CAWIDE_PAIR)
+        .await
+        .expect("pair connect");
+    let resp = pair_request(&conn, ticket.pairing_secret, node_id).await;
+    match resp {
+        ControlMessage::PairResponse {
+            success: false,
+            error: Some(err),
+            host_name: None,
+        } => assert!(
+            err.contains("Update Cawide"),
+            "expected managed-host upgrade error, got {err:?}"
+        ),
+        other => panic!("expected rejected PairResponse, got {other:?}"),
+    }
+    conn.close(VarInt::from_u32(CLOSE_PAIRING_DONE), b"done");
+
+    assert!(!server.auth_store().is_authorized(&node_id));
+    assert!(server.pairing_manager().active_ticket().is_some());
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn managed_pair_request_enrolls_and_returns_signed_proof() {
+    let (server, _tmp) = start_server().await;
+    let ticket = server
+        .pairing_manager()
+        .start_pairing(server.node_id(), None, Vec::new())
+        .unwrap();
+
+    let key = SecretKey::generate();
+    let node_id = *key.public().as_bytes();
+    let ep = client(key).await;
+    let conn = connect(&ep, &server, ALPN_CAWIDE_PAIR)
+        .await
+        .expect("pair connect");
+    let (mut send, mut recv) = open(&conn, StreamPurpose::Control).await;
+    let nonce = [0x7au8; 32];
+    within(write_control_message(
+        &mut send,
+        &ControlMessage::PairManagedRequest {
+            pairing_secret: ticket.pairing_secret,
+            client_node_id: node_id,
+            device_name: "MacBook Pro".into(),
+            account_id: "acct-1".into(),
+            epoch: 4,
+            nonce,
+        },
+    ))
+    .await
+    .unwrap();
+    let resp = within(read_control_message(&mut recv))
+        .await
+        .unwrap()
+        .expect("managed pair response");
+    match resp {
+        ControlMessage::PairManagedResponse {
+            result: Ok(proof_bytes),
+            host_name: Some(name),
+        } => {
+            assert!(!name.trim().is_empty());
+            let proof = cawide_account::ManagedHostProof::from_bytes(&proof_bytes).unwrap();
+            proof.verify().unwrap();
+            assert_eq!(proof.body.account_id, "acct-1");
+            assert_eq!(proof.body.host, server.node_id());
+            assert_eq!(proof.body.claimer, node_id);
+            assert_eq!(proof.body.epoch, 4);
+            assert_eq!(proof.body.nonce, nonce);
+            assert!(proof.body.fresh_pair);
+        }
+        other => panic!("expected PairManagedResponse Ok, got {other:?}"),
+    }
+    conn.close(VarInt::from_u32(CLOSE_PAIRING_DONE), b"done");
+
+    let binding = server.auth_store().managed_binding().unwrap();
+    assert_eq!(binding.account_id, "acct-1");
+    assert_eq!(binding.epoch, 4);
+    assert!(!binding.revoked);
+    assert!(server.pairing_manager().active_ticket().is_none());
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pty_attach_echo_control_and_replay() {
     let (server, _tmp) = start_server().await;
     let (_ep, conn) = authorized_client(&server).await;

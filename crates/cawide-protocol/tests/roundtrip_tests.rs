@@ -98,6 +98,22 @@ fn test_control_messages_roundtrip() {
             url: "https://example.com/".to_string(),
             session_id: None,
         }),
+        ControlMessage::PairManagedRequest {
+            pairing_secret: [0x55; 32],
+            client_node_id: [0x77; 32],
+            device_name: "MacBook Air".to_string(),
+            account_id: "user-123".to_string(),
+            epoch: 2,
+            nonce: [0x88; 32],
+        },
+        ControlMessage::PairManagedResponse {
+            result: Ok(vec![1, 2, 3]),
+            host_name: Some("Workstation".into()),
+        },
+        ControlMessage::PairManagedResponse {
+            result: Err("expired".into()),
+            host_name: None,
+        },
     ];
 
     for msg in messages {
@@ -226,6 +242,11 @@ fn test_rpc_requests_and_responses_roundtrip() {
             choice: AgentChoice::Text {
                 text: "Proceed".to_string(),
             },
+        },
+        RpcRequest::AccountAdopt {
+            account_id: "user-1".to_string(),
+            epoch: 0,
+            nonce: [0xaa; 32],
         },
     ];
 
@@ -413,6 +434,8 @@ fn test_rpc_requests_and_responses_roundtrip() {
         RpcResponse::SetPushChannelV2(Err("invalid key".into())),
         RpcResponse::AgentRespond(Ok(())),
         RpcResponse::AgentRespond(Err("prompt no longer open".into())),
+        RpcResponse::AccountAdopt(Ok(vec![4, 5, 6])),
+        RpcResponse::AccountAdopt(Err("not unmanaged".into())),
     ];
 
     for resp in responses {
@@ -1046,6 +1069,14 @@ fn rpc_variant_indices_are_append_only() {
                 choice: AgentChoice::Option { index: 0 },
             },
         ),
+        (
+            19,
+            RpcRequest::AccountAdopt {
+                account_id: "a".into(),
+                epoch: 0,
+                nonce: [0u8; 32],
+            },
+        ),
     ];
 
     for (expected_idx, req) in requests {
@@ -1108,6 +1139,7 @@ fn rpc_variant_indices_are_append_only() {
         (16, RpcResponse::AccountClaim(Ok(vec![]))),
         (17, RpcResponse::SetPushChannelV2(Ok(()))),
         (18, RpcResponse::AgentRespond(Ok(()))),
+        (19, RpcResponse::AccountAdopt(Ok(vec![]))),
     ];
 
     for (expected_idx, resp) in responses {
@@ -1117,4 +1149,61 @@ fn rpc_variant_indices_are_append_only() {
             "RpcResponse variant index mismatch for {resp:?}"
         );
     }
+}
+
+#[test]
+fn test_pair_managed_control_messages_roundtrip() {
+    let requests = vec![ControlMessage::PairManagedRequest {
+        pairing_secret: [0x42; 32],
+        client_node_id: [0x77; 32],
+        device_name: "MacBook Air".into(),
+        account_id: "acct-1".into(),
+        epoch: 2,
+        nonce: [0x88; 32],
+    }];
+    for msg in requests {
+        let bytes = postcard::to_allocvec(&msg).expect("serialize PairManagedRequest");
+        let decoded: ControlMessage = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(msg, decoded);
+    }
+
+    let responses = vec![
+        ControlMessage::PairManagedResponse {
+            result: Ok(vec![1, 2, 3]),
+            host_name: Some("Workstation".into()),
+        },
+        ControlMessage::PairManagedResponse {
+            result: Err("expired".into()),
+            host_name: None,
+        },
+    ];
+    for msg in responses {
+        let bytes = postcard::to_allocvec(&msg).expect("serialize PairManagedResponse");
+        let decoded: ControlMessage = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(msg, decoded);
+    }
+}
+
+#[test]
+fn test_account_adopt_rpc_roundtrip() {
+    let req = RpcRequest::AccountAdopt {
+        account_id: "acct-1".into(),
+        epoch: 0,
+        nonce: [0x5a; 32],
+    };
+    let bytes = postcard::to_allocvec(&req).expect("serialize AccountAdopt request");
+    assert_eq!(bytes[0], 19, "AccountAdopt request must stay at index 19");
+    let decoded: RpcRequest = postcard::from_bytes(&bytes).expect("deserialize");
+    assert_eq!(req, decoded);
+
+    let ok = RpcResponse::AccountAdopt(Ok(vec![9, 8, 7]));
+    let bytes = postcard::to_allocvec(&ok).expect("serialize AccountAdopt response");
+    assert_eq!(bytes[0], 19, "AccountAdopt response must stay at index 19");
+    let decoded: RpcResponse = postcard::from_bytes(&bytes).expect("deserialize");
+    assert_eq!(ok, decoded);
+
+    let err = RpcResponse::AccountAdopt(Err("Update Cawide and pair from your account".into()));
+    let bytes = postcard::to_allocvec(&err).expect("serialize AccountAdopt error");
+    let decoded: RpcResponse = postcard::from_bytes(&bytes).expect("deserialize");
+    assert_eq!(err, decoded);
 }

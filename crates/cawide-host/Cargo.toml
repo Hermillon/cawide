@@ -79,3 +79,4 @@ windows-sys = { version = "0.52", features = [
 
 [dev-dependencies]
 proptest = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

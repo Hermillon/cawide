@@ -86,6 +86,29 @@ fn arb_control_message() -> impl Strategy<Value = ControlMessage> {
         any::<u64>().prop_map(|client_ts| ControlMessage::Ping { client_ts }),
         (any::<u64>(), any::<u64>())
             .prop_map(|(client_ts, host_ts)| ControlMessage::Pong { client_ts, host_ts }),
+        (
+            any::<[u8; 32]>(),
+            any::<[u8; 32]>(),
+            any::<String>(),
+            any::<String>(),
+            any::<u64>(),
+            any::<[u8; 32]>(),
+        )
+            .prop_map(
+                |(pairing_secret, client_node_id, device_name, account_id, epoch, nonce)| {
+                    ControlMessage::PairManagedRequest {
+                        pairing_secret,
+                        client_node_id,
+                        device_name,
+                        account_id,
+                        epoch,
+                        nonce,
+                    }
+                },
+            ),
+        (any::<Result<Vec<u8>, String>>(), any::<Option<String>>(),).prop_map(
+            |(result, host_name)| ControlMessage::PairManagedResponse { result, host_name }
+        ),
         arb_host_event().prop_map(ControlMessage::HostEvent),
     ]
 }
@@ -201,6 +224,13 @@ fn arb_rpc_request() -> impl Strategy<Value = RpcRequest> {
                     choice,
                 }
             }),
+        (any::<String>(), any::<u64>(), any::<[u8; 32]>()).prop_map(
+            |(account_id, epoch, nonce)| RpcRequest::AccountAdopt {
+                account_id,
+                epoch,
+                nonce,
+            },
+        ),
     ]
 }
 
@@ -542,6 +572,7 @@ fn arb_rpc_response() -> impl Strategy<Value = RpcResponse> {
         any::<Result<Vec<u8>, String>>().prop_map(RpcResponse::AccountClaim),
         any::<Result<(), String>>().prop_map(RpcResponse::SetPushChannelV2),
         any::<Result<(), String>>().prop_map(RpcResponse::AgentRespond),
+        any::<Result<Vec<u8>, String>>().prop_map(RpcResponse::AccountAdopt),
     ]
 }
 
