@@ -1,0 +1,40 @@
+  ⎿  PreToolUse:Edit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+     Exit 127, likely a missing program: The check may not have run. See /hooks.
+  ⎿  Added 1 line, removed 1 line
+      1 -hello world
+      1 +hello cawide
+      2  line two
+  ⎿  PostToolUse:Edit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ Updated /tmp/cc-w2-DQ6UiH/sample.txt, replacing hello world with hello cawide.
+
+⏺ Ran 2 stop hooks
+  ⎿  Stop hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+✻ Baked for 11s · done 9:53 PM
+
+❯ Use WebFetch to fetch https://example.com and tell me the page title.
+  ⎿  UserPromptSubmit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+  ⎿  PreToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+     Exit 127, likely a missing program: The check may not have run. See /hooks.
+  ⎿  PostToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ Fetch(https://example.com)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Fetch
+ Claude wants to fetch content from example.com
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ url: https://example.com/
+ prompt: What is the page title?
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to allow Claude to fetch this content?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for example.com
+   3. No, and tell Claude what to do differently (esc)

@@ -1,0 +1,35 @@
+{
+  "session_id": "12ab6f21-7708-46e7-bf20-69798303fc14",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-hooktest/12ab6f21-7708-46e7-bf20-69798303fc14.jsonl",
+  "cwd": "/private/tmp/cc-hooktest",
+  "prompt_id": "1120c153-ab5d-4cec-b623-918aaf481157",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Pick a color?",
+        "header": "Color",
+        "options": [
+          {
+            "label": "Red",
+            "description": "The color red"
+          },
+          {
+            "label": "Green",
+            "description": "The color green"
+          },
+          {
+            "label": "Blue",
+            "description": "The color blue"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

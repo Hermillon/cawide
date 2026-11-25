@@ -1,0 +1,30 @@
+{
+  "session_id": "99c76d6e-31a8-4906-a663-006c2ac4f4ab",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-fx/99c76d6e-31a8-4906-a663-006c2ac4f4ab.jsonl",
+  "cwd": "/private/tmp/cc-fx",
+  "prompt_id": "ba48ecec-eb34-438c-b8d2-3123e4a744e6",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "touch /tmp/cc-fx/a.txt",
+    "description": "Create /tmp/cc-fx/a.txt with touch"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addDirectories",
+      "directories": [
+        "/tmp/cc-fx"
+      ],
+      "destination": "session"
+    },
+    {
+      "type": "setMode",
+      "mode": "acceptEdits",
+      "destination": "session"
+    }
+  ]
+}

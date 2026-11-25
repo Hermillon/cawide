@@ -1,0 +1,40 @@
+
+⏺ Answered Claude's questions:
+  ⎿  · Pick a color? → Blue
+  ⎿  PostToolUse:AskUserQuestion hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ You picked Blue.
+
+⏺ Ran 2 stop hooks
+  ⎿  Stop hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+✻ Churned for 8s · done 9:54 PM
+
+❯ Use the w2demo echo_msg MCP tool with message "hello mcp" and reply with its output.
+  ⎿  UserPromptSubmit hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+⏺ Calling w2demo…
+  ⎿  PreToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+     Exit 127, likely a missing program: The check may not have run. See /hooks.
+  ⎿  PostToolUse:ToolSearch hook failed
+     /bin/sh: /tmp/ck-itas4f/bin/cawide: No such file or directory
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool use
+ w2demo — Echo Msg Tool: (MCP)
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ message: "hello mcp"
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ About the w2demo — Echo Msg Tool:
+ │ Echo a message back
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for w2demo — Echo Msg commands in /private/tmp/cc-w2-DQ6UiH
+   3. No
+
+ Esc to cancel · Tab to amend

@@ -1,0 +1,20 @@
+{
+  "session_id": "ea7c238f-c0c8-4054-a53d-788a66ecd478",
+  "transcript_path": "/Users/dev/.claude/projects/-private-tmp-cc-fx/ea7c238f-c0c8-4054-a53d-788a66ecd478.jsonl",
+  "cwd": "/private/tmp/cc-fx",
+  "prompt_id": "37c36248-e142-493f-b1cc-9e9977e5e324",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "ls /definitely/not/here",
+    "description": "List nonexistent directory /definitely/not/here"
+  },
+  "tool_use_id": "call_10127903318888660129",
+  "error": "Exit code 1\nls: /definitely/not/here: No such file or directory",
+  "is_interrupt": false,
+  "duration_ms": 81
+}

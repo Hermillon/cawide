@@ -11,6 +11,7 @@ pub enum SignalResolution {
     Approval(Option<String>),
     ClearNonPlan,
     ClearAll,
+    ByKeys(Vec<String>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -76,7 +77,7 @@ pub(crate) fn is_valid_slug(slug: &str) -> bool {
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
 }
 
-fn truncate_chars(s: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => s[..idx].to_string(),
         None => s.to_string(),
@@ -100,10 +101,6 @@ pub fn map_signal(
     });
 
     let mut signal = match agent {
-        "claude" => wrap_legacy_signal(
-            map_claude(resolved_event, payload)?,
-            matches!(resolved_event, Some("UserPromptSubmit")),
-        ),
         "codex" => wrap_legacy_signal(
             map_codex(resolved_event, payload)?,
             matches!(resolved_event, Some("UserPromptSubmit")),
@@ -164,7 +161,7 @@ fn wrap_legacy_signal(status: AgentStatus, is_started: bool) -> AgentSignal {
     }
 }
 
-fn extract_target(tool_input: Option<&serde_json::Value>) -> &str {
+pub(crate) fn extract_target(tool_input: Option<&serde_json::Value>) -> &str {
     let Some(ti) = tool_input else {
         return "";
     };
@@ -173,122 +170,6 @@ fn extract_target(tool_input: Option<&serde_json::Value>) -> &str {
         .or_else(|| ti.get("path"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
-}
-
-fn map_claude(event: Option<&str>, payload: &serde_json::Value) -> Option<AgentStatus> {
-    match event? {
-        "SessionStart" | "SessionEnd" => Some(AgentStatus::Idle),
-        "UserPromptSubmit" => {
-            let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-            Some(AgentStatus::Thinking {
-                task_desc: truncate_chars(prompt, 280),
-            })
-        }
-        "PermissionRequest" => {
-            let tool_name = payload
-                .get("tool_name")
-                .or_else(|| payload.get("toolName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let tool_input = payload
-                .get("tool_input")
-                .or_else(|| payload.get("toolInput"));
-            let target = extract_target(tool_input);
-            let prompt = if target.is_empty() {
-                format!("Approve {tool_name}")
-            } else {
-                format!("Approve {tool_name}: {target}")
-            };
-            Some(AgentStatus::WaitingForInput {
-                prompt: truncate_chars(&prompt, 280),
-                options: vec!["Allow".into(), "Deny".into()],
-            })
-        }
-        "PreToolUse" => {
-            let tool_name = payload
-                .get("tool_name")
-                .or_else(|| payload.get("toolName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if tool_name == "AskUserQuestion" {
-                let q_obj = payload
-                    .get("tool_input")
-                    .or_else(|| payload.get("toolInput"))
-                    .and_then(|ti| ti.get("questions"))
-                    .or_else(|| payload.get("questions"))
-                    .and_then(|q| q.get(0));
-                let question = q_obj
-                    .and_then(|q| q.get("question"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let options = q_obj
-                    .and_then(|q| q.get("options"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .take(8)
-                            .map(|val| {
-                                let s = val
-                                    .as_str()
-                                    .or_else(|| val.get("label").and_then(|l| l.as_str()))
-                                    .unwrap_or("");
-                                truncate_chars(s, 80)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Some(AgentStatus::WaitingForInput {
-                    prompt: truncate_chars(question, 280),
-                    options,
-                })
-            } else if tool_name == "ExitPlanMode" {
-                Some(AgentStatus::WaitingForInput {
-                    prompt: "Approve plan implementation?".into(),
-                    options: vec!["Approve".into(), "Revise".into()],
-                })
-            } else {
-                let tool_input = payload
-                    .get("tool_input")
-                    .or_else(|| payload.get("toolInput"));
-                let target = extract_target(tool_input);
-                let desc = if target.is_empty() {
-                    format!("Using {tool_name}")
-                } else {
-                    format!("{tool_name}: {target}")
-                };
-                Some(AgentStatus::Thinking {
-                    task_desc: truncate_chars(&desc, 280),
-                })
-            }
-        }
-        "PostToolUse" => Some(AgentStatus::Thinking {
-            task_desc: "Thinking…".into(),
-        }),
-        "Notification" => match payload.get("notification_type").and_then(|v| v.as_str()) {
-            Some("permission_prompt" | "elicitation_dialog") => {
-                let msg = payload
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                Some(AgentStatus::WaitingForInput {
-                    prompt: truncate_chars(msg, 280),
-                    options: Vec::new(),
-                })
-            }
-            _ => None,
-        },
-        "Stop" => {
-            let summary = payload
-                .get("last_assistant_message")
-                .or_else(|| payload.get("last-assistant-message"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            Some(AgentStatus::Completed {
-                summary: truncate_chars(summary, 280),
-            })
-        }
-        _ => None,
-    }
 }
 
 fn map_codex(event: Option<&str>, payload: &serde_json::Value) -> Option<AgentStatus> {
@@ -936,85 +817,41 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_and_codex_lifecycle() {
-        for agent in &["claude", "codex"] {
-            assert_eq!(
-                map_event(agent, Some("SessionStart"), &json!({})),
-                Some(AgentStatus::Idle)
-            );
-            assert_eq!(
-                map_event(agent, Some("SessionEnd"), &json!({})),
-                Some(AgentStatus::Idle)
-            );
-            assert_eq!(
-                map_event(
-                    agent,
-                    Some("UserPromptSubmit"),
-                    &json!({ "prompt": "build features" })
-                ),
-                Some(AgentStatus::Thinking {
-                    task_desc: "build features".into()
-                })
-            );
-            assert_eq!(
-                map_event(agent, Some("PreToolUse"), &json!({ "tool_name": "grep" })),
-                Some(AgentStatus::Thinking {
-                    task_desc: "Using grep".into()
-                })
-            );
-            assert_eq!(
-                map_event(
-                    agent,
-                    Some("Stop"),
-                    &json!({ "last_assistant_message": "All done!" })
-                ),
-                Some(AgentStatus::Completed {
-                    summary: "All done!".into()
-                })
-            );
-        }
-    }
-
-    #[test]
-    fn test_claude_notifications() {
+    fn test_codex_lifecycle() {
+        let agent = "codex";
+        assert_eq!(
+            map_event(agent, Some("SessionStart"), &json!({})),
+            Some(AgentStatus::Idle)
+        );
+        assert_eq!(
+            map_event(agent, Some("SessionEnd"), &json!({})),
+            Some(AgentStatus::Idle)
+        );
         assert_eq!(
             map_event(
-                "claude",
-                Some("Notification"),
-                &json!({
-                    "notification_type": "permission_prompt",
-                    "message": "Allow bash execution?"
-                })
+                agent,
+                Some("UserPromptSubmit"),
+                &json!({ "prompt": "build features" })
             ),
-            Some(AgentStatus::WaitingForInput {
-                prompt: "Allow bash execution?".into(),
-                options: vec![]
+            Some(AgentStatus::Thinking {
+                task_desc: "build features".into()
+            })
+        );
+        assert_eq!(
+            map_event(agent, Some("PreToolUse"), &json!({ "tool_name": "grep" })),
+            Some(AgentStatus::Thinking {
+                task_desc: "Using grep".into()
             })
         );
         assert_eq!(
             map_event(
-                "claude",
-                Some("Notification"),
-                &json!({
-                    "notification_type": "elicitation_dialog",
-                    "message": "Which file do you mean?"
-                })
+                agent,
+                Some("Stop"),
+                &json!({ "last_assistant_message": "All done!" })
             ),
-            Some(AgentStatus::WaitingForInput {
-                prompt: "Which file do you mean?".into(),
-                options: vec![]
+            Some(AgentStatus::Completed {
+                summary: "All done!".into()
             })
-        );
-        assert_eq!(
-            map_event(
-                "claude",
-                Some("Notification"),
-                &json!({
-                    "notification_type": "idle_prompt",
-                    "message": "Still there?"
-                })
-            ),
-            None
         );
     }
 
@@ -1197,74 +1034,39 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_and_codex_extended() {
-        for agent in &["claude", "codex"] {
-            assert_eq!(
-                map_event(
-                    agent,
-                    Some("PermissionRequest"),
-                    &json!({
-                        "tool_name": "Bash",
-                        "tool_input": { "command": "rm -rf /tmp/foo" }
-                    })
-                ),
-                Some(AgentStatus::WaitingForInput {
-                    prompt: "Approve Bash: rm -rf /tmp/foo".into(),
-                    options: vec!["Allow".into(), "Deny".into()]
-                })
-            );
-            assert_eq!(
-                map_event(
-                    agent,
-                    Some("PreToolUse"),
-                    &json!({
-                        "tool_name": "FileEdit",
-                        "tool_input": { "file_path": "src/main.rs" }
-                    })
-                ),
-                Some(AgentStatus::Thinking {
-                    task_desc: "FileEdit: src/main.rs".into()
-                })
-            );
-            assert_eq!(
-                map_event(agent, Some("PostToolUse"), &json!({})),
-                Some(AgentStatus::Thinking {
-                    task_desc: "Thinking…".into()
-                })
-            );
-        }
-
+    fn test_codex_extended() {
+        let agent = "codex";
         assert_eq!(
             map_event(
-                "claude",
-                Some("PreToolUse"),
+                agent,
+                Some("PermissionRequest"),
                 &json!({
-                    "tool_name": "AskUserQuestion",
-                    "tool_input": {
-                        "questions": [
-                            {
-                                "question": "Should we proceed?",
-                                "options": ["Yes", "No"]
-                            }
-                        ]
-                    }
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "rm -rf /tmp/foo" }
                 })
             ),
             Some(AgentStatus::WaitingForInput {
-                prompt: "Should we proceed?".into(),
-                options: vec!["Yes".into(), "No".into()]
+                prompt: "Approve Bash: rm -rf /tmp/foo".into(),
+                options: vec!["Allow".into(), "Deny".into()]
             })
         );
-
         assert_eq!(
             map_event(
-                "claude",
+                agent,
                 Some("PreToolUse"),
-                &json!({ "tool_name": "ExitPlanMode" })
+                &json!({
+                    "tool_name": "FileEdit",
+                    "tool_input": { "file_path": "src/main.rs" }
+                })
             ),
-            Some(AgentStatus::WaitingForInput {
-                prompt: "Approve plan implementation?".into(),
-                options: vec!["Approve".into(), "Revise".into()]
+            Some(AgentStatus::Thinking {
+                task_desc: "FileEdit: src/main.rs".into()
+            })
+        );
+        assert_eq!(
+            map_event(agent, Some("PostToolUse"), &json!({})),
+            Some(AgentStatus::Thinking {
+                task_desc: "Thinking…".into()
             })
         );
     }
@@ -1273,7 +1075,7 @@ mod tests {
     fn test_truncation() {
         let long_prompt = "x".repeat(350);
         let res = map_event(
-            "claude",
+            "codex",
             Some("UserPromptSubmit"),
             &json!({ "prompt": long_prompt }),
         );
@@ -1497,7 +1299,7 @@ mod tests {
     #[test]
     fn test_legacy_agents_wrap_signal() {
         let perm = map_signal(
-            "claude",
+            "codex",
             Some("PermissionRequest"),
             &json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
         )
@@ -1509,7 +1311,7 @@ mod tests {
         );
 
         let stop = map_signal(
-            "claude",
+            "codex",
             Some("Stop"),
             &json!({ "last_assistant_message": "Done" }),
         )
@@ -1520,17 +1322,17 @@ mod tests {
         assert_eq!(oc_idle.outcome, TurnOutcome::Done);
 
         let perm_sig = map_signal(
-            "claude",
+            "codex",
             Some("PermissionRequest"),
             &json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
         )
         .unwrap();
         assert_eq!(perm_sig.resolution, SignalResolution::None);
 
-        let post_tool = map_signal("claude", Some("PostToolUse"), &json!({})).unwrap();
+        let post_tool = map_signal("codex", Some("PostToolUse"), &json!({})).unwrap();
         assert_eq!(post_tool.resolution, SignalResolution::ClearNonPlan);
 
-        let start_sig = map_signal("claude", Some("SessionStart"), &json!({})).unwrap();
+        let start_sig = map_signal("codex", Some("SessionStart"), &json!({})).unwrap();
         assert_eq!(start_sig.resolution, SignalResolution::ClearAll);
     }
 

@@ -68,7 +68,7 @@ const INHERITED_TERMINAL_IDENTITY_PREFIXES: &[&str] = &[
     "WMUX_",
     "ZELLIJ_",
 ];
-fn is_inherited_terminal_identity(key: &str) -> bool {
+pub(crate) fn is_inherited_terminal_identity(key: &str) -> bool {
     INHERITED_TERMINAL_IDENTITY_KEYS.contains(&key)
         || INHERITED_TERMINAL_IDENTITY_PREFIXES
             .iter()
@@ -371,6 +371,11 @@ impl PtySession {
     /// Returns either a replay slice or a full headless screen snapshot.
     pub fn attach_start(&self, requested: u64) -> AttachStart {
         self.output.lock().attach_start(requested)
+    }
+
+    /// Current screen contents rendered by the internal headless terminal emulator.
+    pub fn screen_contents(&self) -> String {
+        self.output.lock().screen_contents()
     }
 
     /// Returns the current terminal input mode flags (ECHO, CANONICAL), if supported.

@@ -541,8 +541,14 @@ pub fn collect_profile(
     }
 
     // 4. Strip Cawide's own hooks from staging
+    let claude_settings_staged = claude_staged.join("settings.json");
+    if claude_settings_staged.exists() {
+        if let Err(e) = crate::agent::setup::remove_legacy_claude_hooks(&claude_settings_staged) {
+            notices.push(format!("could not remove Cawide hooks for claude: {e}"));
+        }
+    }
+
     let hook_targets = [
-        ("claude", claude_staged.join("settings.json")),
         ("codex", codex_staged.join("config.toml")),
         ("codex", codex_staged.join("hooks.json")),
         ("omp", omp_staged.join("extensions/cawide.js")),

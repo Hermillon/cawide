@@ -1,5 +1,6 @@
 //! Integration tests for agent telemetry, hooks, and shell setup (Brick 7).
 
+mod claude_w3;
 mod common;
 
 use std::path::PathBuf;
@@ -58,6 +59,11 @@ fn test_setup_claude_idempotent_and_preserves_keys() {
             "SessionStart": [
                 {
                     "hooks": [
+                        { "type": "command", "command": "/usr/local/bin/cawide hook claude --event SessionStart" }
+                    ]
+                },
+                {
+                    "hooks": [
                         { "type": "command", "command": "echo custom_start" }
                     ]
                 }
@@ -72,34 +78,28 @@ fn test_setup_claude_idempotent_and_preserves_keys() {
 
     let exe = PathBuf::from("/usr/local/bin/cawide");
     let summary1 = run_setup(home, &exe, "claude", false).unwrap();
-    assert!(!summary1.is_empty());
+    assert!(summary1.contains("Cleaned legacy hooks"));
 
     let bytes1 = std::fs::read(&settings_file).unwrap();
     let bak_file = claude_dir.join("settings.json.cawide-bak");
     assert!(
-        bak_file.exists(),
-        ".cawide-bak must be created on first edit"
+        !bak_file.exists(),
+        ".cawide-bak must NOT be created when cleaning legacy claude hooks"
     );
-    let bak_content: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&bak_file).unwrap()).unwrap();
-    assert_eq!(bak_content["unrelated_key"], "preserved_value");
 
-    let _summary2 = run_setup(home, &exe, "claude", false).unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes1).unwrap();
+    assert_eq!(parsed["unrelated_key"], "preserved_value");
+    let start_groups = parsed["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(start_groups.len(), 1, "only custom hook remains");
+    assert_eq!(start_groups[0]["hooks"][0]["command"], "echo custom_start");
+
+    let summary2 = run_setup(home, &exe, "claude", false).unwrap();
+    assert!(!summary2.contains("Cleaned legacy hooks"));
     let bytes2 = std::fs::read(&settings_file).unwrap();
     assert_eq!(bytes1, bytes2, "setup must be byte-for-byte idempotent");
 
-    let parsed: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
-    assert_eq!(parsed["unrelated_key"], "preserved_value");
-    let start_groups = parsed["hooks"]["SessionStart"].as_array().unwrap();
-    assert_eq!(start_groups.len(), 2, "custom hook + cawide hook");
-
-    // Test remove
-    let _summary3 = run_setup(home, &exe, "claude", true).unwrap();
-    let removed_bytes = std::fs::read(&settings_file).unwrap();
-    let removed_parsed: serde_json::Value = serde_json::from_slice(&removed_bytes).unwrap();
-    assert_eq!(removed_parsed["unrelated_key"], "preserved_value");
-    let rem_start_groups = removed_parsed["hooks"]["SessionStart"].as_array().unwrap();
-    assert_eq!(rem_start_groups.len(), 1, "only custom hook remains");
+    // remove_legacy_claude_hooks directly is also a no-op once cleaned
+    assert!(!cawide_host::agent::setup::remove_legacy_claude_hooks(&settings_file).unwrap());
 }
 
 #[test]
@@ -212,14 +212,23 @@ fn test_setup_omp_refuses_non_marker_and_opencode() {
 
 #[test]
 fn test_cli_hook_no_env() {
-    let output = Command::new(env!("CARGO_BIN_EXE_cawide"))
+    let codex_out = Command::new(env!("CARGO_BIN_EXE_cawide"))
+        .arg("hook")
+        .arg("codex")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(codex_out.status.success());
+    assert_eq!(String::from_utf8_lossy(&codex_out.stdout), "{}");
+
+    let claude_out = Command::new(env!("CARGO_BIN_EXE_cawide"))
         .arg("hook")
         .arg("claude")
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "{}");
+    assert!(claude_out.status.success());
+    assert!(claude_out.stdout.is_empty());
 }
 
 #[test]
@@ -241,7 +250,7 @@ fn test_cli_hook_hanging_stdin_timeout() {
     let start = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_cawide"))
         .arg("hook")
-        .arg("claude")
+        .arg("codex")
         .env("CAWIDE_SESSION_ID", "test-sess")
         .env("CAWIDE_SOCKET", "/tmp/nonexistent-cawide.sock")
         .stdin(Stdio::piped())
@@ -268,7 +277,7 @@ fn test_cli_hook_hanging_stdin_timeout() {
 async fn test_e2e_hook_agent_status_changed() {
     let tmp = tempfile::tempdir().unwrap();
     let launch = format!(
-        "sh -c 'sleep 1; echo \"{{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"last_assistant_message\\\":\\\"done\\\"}}\" | {} hook claude; sleep 5'",
+        "sh -c 'sleep 1; echo \"{{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"last_assistant_message\\\":\\\"done\\\"}}\" | {} hook codex; sleep 5'",
         env!("CARGO_BIN_EXE_cawide")
     );
     let config = CawideServerConfig {
@@ -327,7 +336,7 @@ async fn test_e2e_hook_agent_status_changed() {
         Some(HostEvent::SessionUpdated { summary }) => {
             assert_eq!(summary.session_id, "agent-sess");
             let state = summary.agent.expect("agent state present");
-            assert_eq!(state.agent, "claude");
+            assert_eq!(state.agent, "codex");
             assert_eq!(
                 state.status,
                 AgentStatus::Completed {
@@ -354,7 +363,7 @@ async fn test_e2e_hook_agent_status_changed() {
                 .expect("session must be listed");
             assert!(s.agent.is_some(), "agent must be set");
             let agent_state = s.agent.as_ref().unwrap();
-            assert_eq!(agent_state.agent, "claude");
+            assert_eq!(agent_state.agent, "codex");
             assert_eq!(
                 agent_state.status,
                 AgentStatus::Completed {
@@ -423,7 +432,7 @@ async fn test_cli_hook_strict_pty_gating() {
     }
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "{}");
+    assert!(out.stdout.is_empty());
 
     // 2. Missing CAWIDE_SOCKET (even with CAWIDE_SESSION_ID and CAWIDE_CONFIG_DIR) must be ignored.
     let mut child = Command::new(env!("CARGO_BIN_EXE_cawide"))

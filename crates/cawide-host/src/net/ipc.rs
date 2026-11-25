@@ -42,6 +42,11 @@ pub enum IpcRequest {
         session_id: String,
         agent: String,
     },
+    ClaudeEvent(ClaudeHookEvent),
+    ClaudePermission {
+        event: ClaudeHookEvent,
+        attention: crate::agent::map::AttentionSpec,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -85,6 +90,67 @@ pub enum IpcResponse {
         was_linked: bool,
     },
     DevicesWithSource(Vec<DeviceInfoWithSource>),
+    ClaudeRegistered {
+        request_key: String,
+        tool_use_id: Option<String>,
+    },
+    ClaudeReply(ClaudeReply),
+    ClaudeDismissed,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeEventKind {
+    SessionStart,
+    UserPromptSubmit,
+    PreToolUse,
+    PermissionRequest,
+    PermissionDenied,
+    PostToolUse,
+    PostToolUseFailure,
+    Notification,
+    SubagentStart,
+    SubagentStop,
+    PreCompact,
+    PostCompact,
+    Stop,
+    StopFailure,
+    SessionEnd,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeHookEvent {
+    pub session_id: String,
+    pub claude_session_id: String,
+    pub kind: ClaudeEventKind,
+    pub agent_id: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub input_hash: Option<u64>,
+    pub text: Option<String>,
+    pub source: Option<String>,
+    pub notification_type: Option<String>,
+    pub background_count: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeReply {
+    Allow,
+    Deny {
+        message: Option<String>,
+    },
+    Answer {
+        option_index: Option<u32>,
+        text: Option<String>,
+    },
+    ApprovePlan {
+        accept_edits: bool,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeHookFrame {
+    AnsweredElsewhere,
+    Interrupted,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -572,6 +638,114 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
             }
             writer_task.abort();
             ctx.registry.unregister_agent_stream(&session_id, stream_id);
+            return Ok(());
+        }
+        IpcRequest::ClaudeEvent(ev) => {
+            let resp = crate::agent::claude::ingest_event(&ctx.registry, &ctx.broadcaster, ev);
+            (resp, false)
+        }
+        IpcRequest::ClaudePermission { event, attention } => {
+            let session_id = event.session_id.clone();
+            if session_id.is_empty() {
+                write_length_prefixed(
+                    &mut stream,
+                    &IpcResponse::Error("unknown session".into()),
+                    MAX_IPC_FRAME_SIZE,
+                )
+                .await?;
+                stream.shutdown().await?;
+                return Ok(());
+            }
+
+            let mut shutdown_rx = ctx.shutdown_tx.subscribe();
+            if *shutdown_rx.borrow() {
+                let _ = write_length_prefixed(
+                    &mut stream,
+                    &IpcResponse::ClaudeDismissed,
+                    MAX_IPC_FRAME_SIZE,
+                )
+                .await;
+                let _ = stream.flush().await;
+                let _ = stream.shutdown().await;
+                return Ok(());
+            }
+
+            let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
+            let reg_info = match ctx.registry.register_claude_permission(
+                &session_id,
+                event,
+                attention,
+                reply_tx,
+            ) {
+                Ok(info) => info,
+                Err(err) => {
+                    write_length_prefixed(
+                        &mut stream,
+                        &IpcResponse::Error(err),
+                        MAX_IPC_FRAME_SIZE,
+                    )
+                    .await?;
+                    stream.shutdown().await?;
+                    return Ok(());
+                }
+            };
+
+            let reg_resp = IpcResponse::ClaudeRegistered {
+                request_key: reg_info.request_key.clone(),
+                tool_use_id: reg_info.tool_use_id,
+            };
+            if let Err(e) = write_length_prefixed(&mut stream, &reg_resp, MAX_IPC_FRAME_SIZE).await
+            {
+                ctx.registry
+                    .resolve_claude_hook_frame(&session_id, &reg_info.request_key, None);
+                return Err(NetError::Protocol(e));
+            }
+            if let Err(e) = stream.flush().await {
+                ctx.registry
+                    .resolve_claude_hook_frame(&session_id, &reg_info.request_key, None);
+                return Err(NetError::Io(e));
+            }
+
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            let request_key = reg_info.request_key;
+            let reply_opt = tokio::select! {
+                frame_res = read_length_prefixed::<_, ClaudeHookFrame>(&mut reader, MAX_IPC_FRAME_SIZE) => {
+                    match frame_res {
+                        Ok(Some(frame)) => {
+                            ctx.registry.resolve_claude_hook_frame(&session_id, &request_key, Some(frame));
+                            None
+                        }
+                        Ok(None) | Err(_) => {
+                            ctx.registry.resolve_claude_hook_frame(&session_id, &request_key, None);
+                            None
+                        }
+                    }
+                }
+                reply_res = &mut reply_rx => {
+                    reply_res.ok()
+                }
+                res = shutdown_rx.changed() => {
+                    if res.is_err() || *shutdown_rx.borrow() {
+                        ctx.registry.resolve_claude_hook_frame(&session_id, &request_key, None);
+                    }
+                    None
+                }
+            };
+
+            let final_resp = match reply_opt {
+                Some(reply) => IpcResponse::ClaudeReply(reply),
+                None => IpcResponse::ClaudeDismissed,
+            };
+
+            let _ = tokio::time::timeout(HANDSHAKE_STEP_TIMEOUT, async {
+                write_length_prefixed(&mut writer, &final_resp, MAX_IPC_FRAME_SIZE).await?;
+                writer
+                    .flush()
+                    .await
+                    .map_err(cawide_protocol::ProtocolError::Io)
+            })
+            .await;
+
             return Ok(());
         }
     };
