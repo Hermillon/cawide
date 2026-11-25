@@ -106,6 +106,35 @@ fn project_name(entry: &SessionEntry) -> Option<String> {
         .map(str::to_string)
 }
 
+fn tab_title(session_id: &str, entry: &SessionEntry) -> Option<String> {
+    if let Some(title) = entry
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(title.to_string());
+    }
+    if let Some(dir_name) = entry
+        .cwd
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(dir_name.to_string());
+    }
+    Some(session_id.to_string())
+}
+
+fn session_failed_error(entry: &SessionEntry) -> Option<String> {
+    let _ = entry.session.is_alive();
+    entry
+        .session
+        .exit_code()
+        .filter(|&c| c != 0)
+        .map(|c| format!("Process exited with code {c}"))
+}
+
 fn summary(id: &str, e: &SessionEntry) -> SessionSummary {
     SessionSummary {
         session_id: id.to_string(),
@@ -227,7 +256,7 @@ impl SessionRegistry {
     fn emit_alert(&self, session_id: &str, entry: &SessionEntry, mut alert: TrackerAlert) {
         if let Some(tx) = &self.alerts {
             alert.detail.project = project_name(entry);
-            alert.detail.session_title = entry.title.clone();
+            alert.detail.session_title = tab_title(session_id, entry);
             if let Err(e) = tx.try_send(crate::push::AgentAlert {
                 session_id: session_id.to_string(),
                 agent: alert.agent,
@@ -257,7 +286,7 @@ impl SessionRegistry {
     ) {
         if let Some(tx) = &self.activities {
             activity.detail.project = project_name(entry);
-            activity.detail.session_title = entry.title.clone();
+            activity.detail.session_title = tab_title(session_id, entry);
             if let Err(e) = tx.try_send(crate::push::ActivityUpdateEvent {
                 session_id: session_id.to_string(),
                 agent: activity.agent,
@@ -267,6 +296,7 @@ impl SessionRegistry {
                 started_at: activity.started_at,
                 prompt_id: activity.prompt_id,
                 is_tool_step: activity.is_tool_step,
+                dismiss_immediately: activity.dismiss_immediately,
                 detail: activity.detail,
             }) {
                 tracing::debug!(session = %session_id, error = %e, "dropped activity update");
@@ -279,15 +309,18 @@ impl SessionRegistry {
         session_id: &str,
         entry: &SessionEntry,
         failed_error: Option<String>,
+        dismiss_immediately: bool,
         ts: u64,
     ) {
         let Some(state) = entry.tracker.current() else {
             return;
         };
-        if !matches!(
-            state.status,
-            AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. }
-        ) {
+        let should_emit = match state.status {
+            AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. } => true,
+            AgentStatus::Completed { .. } => dismiss_immediately,
+            AgentStatus::Idle => false,
+        };
+        if !should_emit {
             return;
         }
         let started_at = entry.tracker.turn_started_at().unwrap_or(ts);
@@ -310,6 +343,7 @@ impl SessionRegistry {
                 started_at,
                 prompt_id: None,
                 is_tool_step: false,
+                dismiss_immediately,
                 detail: crate::push::AlertDetail {
                     error: failed_error,
                     duration_secs,
@@ -318,6 +352,61 @@ impl SessionRegistry {
             },
             ts,
         );
+    }
+
+    fn emit_removed_exit_activity(
+        &self,
+        session_id: &str,
+        entry: &SessionEntry,
+        include_exit_error: bool,
+        ts: u64,
+    ) {
+        if !entry.exit_alerted {
+            let failed_error = include_exit_error
+                .then(|| session_failed_error(entry))
+                .flatten();
+            let dismiss_immediately = failed_error.is_none();
+            self.emit_exit_activity(session_id, entry, failed_error, dismiss_immediately, ts);
+        }
+    }
+
+    fn handle_dead_session_exit(
+        &self,
+        session_id: &str,
+        entry: &mut SessionEntry,
+        emit_failed_alert: bool,
+        ts: u64,
+    ) {
+        if !entry.exit_alerted {
+            entry.exit_alerted = true;
+            let failed_error = session_failed_error(entry);
+            if emit_failed_alert {
+                if let Some(err) = &failed_error {
+                    if let Some(state) = entry.tracker.current() {
+                        if matches!(
+                            state.status,
+                            AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. }
+                        ) {
+                            self.emit_alert(
+                                session_id,
+                                entry,
+                                TrackerAlert {
+                                    agent: state.agent,
+                                    kind: crate::push::AgentAlertKind::Failed,
+                                    attention_id: 0,
+                                    detail: crate::push::AlertDetail {
+                                        error: Some(err.clone()),
+                                        ..Default::default()
+                                    },
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            let dismiss_immediately = failed_error.is_none();
+            self.emit_exit_activity(session_id, entry, failed_error, dismiss_immediately, ts);
+        }
     }
 
     fn bump(&self) -> u64 {
@@ -351,15 +440,7 @@ impl SessionRegistry {
             if entry.session.is_alive() {
                 return Ok(Arc::clone(&entry.session));
             }
-            if !entry.exit_alerted {
-                entry.exit_alerted = true;
-                let failed_error = entry
-                    .session
-                    .exit_code()
-                    .filter(|&c| c != 0)
-                    .map(|c| format!("Process exited with code {c}"));
-                self.emit_exit_activity(session_id, entry, failed_error, now_secs());
-            }
+            self.handle_dead_session_exit(session_id, entry, false, now_secs());
         }
         if !sessions.contains_key(session_id) && sessions.len() >= MAX_SESSIONS {
             return Err(PtyError::MaxSessions(MAX_SESSIONS));
@@ -485,9 +566,7 @@ impl SessionRegistry {
         let Some(entry) = entry else {
             return Err(format!("session not found: {session_id}"));
         };
-        if !entry.exit_alerted {
-            self.emit_exit_activity(session_id, &entry, None, now_secs());
-        }
+        self.emit_removed_exit_activity(session_id, &entry, false, now_secs());
         if let Err(e) = entry.session.kill() {
             tracing::debug!(session = %session_id, error = %e, "kill failed (process may have exited)");
         }
@@ -777,36 +856,8 @@ impl SessionRegistry {
         }
         let ts = now_secs();
         for (id, entry) in sessions.iter_mut() {
-            if !entry.session.is_alive() && !entry.exit_alerted {
-                entry.exit_alerted = true;
-                let failed_error = entry
-                    .session
-                    .exit_code()
-                    .filter(|&c| c != 0)
-                    .map(|c| format!("Process exited with code {c}"));
-                if let Some(err) = &failed_error {
-                    if let Some(state) = entry.tracker.current() {
-                        if matches!(
-                            state.status,
-                            AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. }
-                        ) {
-                            self.emit_alert(
-                                id,
-                                entry,
-                                TrackerAlert {
-                                    agent: state.agent,
-                                    kind: crate::push::AgentAlertKind::Failed,
-                                    attention_id: 0,
-                                    detail: crate::push::AlertDetail {
-                                        error: Some(err.clone()),
-                                        ..Default::default()
-                                    },
-                                },
-                            );
-                        }
-                    }
-                }
-                self.emit_exit_activity(id, entry, failed_error, ts);
+            if !entry.session.is_alive() {
+                self.handle_dead_session_exit(id, entry, true, ts);
             }
         }
 
@@ -841,14 +892,7 @@ impl SessionRegistry {
 
     pub fn remove(&self, session_id: &str) -> Option<Arc<PtySession>> {
         let entry = self.sessions.write().remove(session_id)?;
-        if !entry.exit_alerted {
-            let failed_error = entry
-                .session
-                .exit_code()
-                .filter(|&c| c != 0)
-                .map(|c| format!("Process exited with code {c}"));
-            self.emit_exit_activity(session_id, &entry, failed_error, now_secs());
-        }
+        self.emit_removed_exit_activity(session_id, &entry, true, now_secs());
         Some(entry.session)
     }
 
@@ -866,14 +910,7 @@ impl SessionRegistry {
             }
         };
         if let Some(entry) = removed {
-            if !entry.exit_alerted {
-                let failed_error = entry
-                    .session
-                    .exit_code()
-                    .filter(|&c| c != 0)
-                    .map(|c| format!("Process exited with code {c}"));
-                self.emit_exit_activity(session_id, &entry, failed_error, now_secs());
-            }
+            self.emit_removed_exit_activity(session_id, &entry, true, now_secs());
         }
     }
 
@@ -920,9 +957,7 @@ impl SessionRegistry {
         let drained: Vec<(String, SessionEntry)> = self.sessions.write().drain().collect();
         let ts = now_secs();
         for (id, entry) in drained {
-            if !entry.exit_alerted {
-                self.emit_exit_activity(&id, &entry, None, ts);
-            }
+            self.emit_removed_exit_activity(&id, &entry, false, ts);
             if let Err(e) = entry.session.kill() {
                 tracing::debug!(session = %id, error = %e, "failed to kill session");
             }
@@ -1083,10 +1118,183 @@ mod tests {
         assert_eq!(ev5.session_id, "s2");
         assert_eq!(ev5.phase, ActivityPhase::Failed);
         assert_eq!(ev5.event, ActivityEventKind::End);
+        assert!(!ev5.dismiss_immediately);
         assert!(ev5
             .detail
             .error
             .as_deref()
             .is_some_and(|e| e.contains("code 2")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_kill_session_and_clean_eof_after_completed_dismiss_immediately() {
+        use crate::agent::map::{SignalResolution, TurnOutcome};
+        use crate::push::{ActivityEventKind, ActivityPhase};
+
+        let broadcaster = Arc::new(HostEventBroadcaster::new(16));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj_dir = dir.path().join("tab-proj");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let canonical = proj_dir.canonicalize().unwrap();
+        let (act_tx, mut act_rx) = tokio::sync::mpsc::channel(32);
+        let (alert_tx, mut alert_rx) = tokio::sync::mpsc::channel(32);
+        let reg = SessionRegistry::new(canonical, None, Vec::new(), broadcaster)
+            .with_activity_sender(act_tx)
+            .with_alert_sender(alert_tx);
+
+        // 1. kill_session after Completed emits End with dismiss_immediately: true
+        reg.create_session("s-kill", Some("sleep 30".into()), None, 80, 24)
+            .unwrap();
+        reg.apply_hook_signal(
+            "s-kill",
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Thinking {
+                    task_desc: String::new(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Started,
+                resolution: SignalResolution::None,
+                seq: Some(1),
+                epoch: Some(1),
+            },
+        );
+        let ev_start = act_rx.try_recv().unwrap();
+        // No title set -> falls back to cwd dir name
+        assert_eq!(ev_start.detail.session_title.as_deref(), Some("tab-proj"));
+
+        reg.apply_hook_signal(
+            "s-kill",
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Completed {
+                    summary: "done".into(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Done,
+                resolution: SignalResolution::ClearNonPlan,
+                seq: Some(2),
+                epoch: Some(1),
+            },
+        );
+        let ev_done = act_rx.try_recv().unwrap();
+        assert_eq!(ev_done.event, ActivityEventKind::End);
+        assert!(!ev_done.dismiss_immediately);
+        let alert_done = alert_rx.try_recv().unwrap();
+        assert_eq!(alert_done.detail.session_title.as_deref(), Some("tab-proj"));
+
+        reg.kill_session("s-kill").unwrap();
+        let ev_kill = act_rx.try_recv().unwrap();
+        assert_eq!(ev_kill.session_id, "s-kill");
+        assert_eq!(ev_kill.phase, ActivityPhase::Done);
+        assert_eq!(ev_kill.event, ActivityEventKind::End);
+        assert!(ev_kill.dismiss_immediately);
+
+        // 2. Clean EOF exit (exit 0) in probe after Completed emits End with dismiss_immediately: true
+        reg.create_session("s-eof", Some("sh -c 'exit 0'".into()), None, 80, 24)
+            .unwrap();
+        reg.apply_hook_signal(
+            "s-eof",
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Completed {
+                    summary: "done".into(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Done,
+                resolution: SignalResolution::ClearNonPlan,
+                seq: Some(1),
+                epoch: Some(1),
+            },
+        );
+        let _ = act_rx.try_recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while reg.get("s-eof").unwrap().is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut scratch = ProcScratch::default();
+        reg.probe(&mut scratch);
+        let ev_eof = act_rx.try_recv().unwrap();
+        assert_eq!(ev_eof.session_id, "s-eof");
+        assert_eq!(ev_eof.phase, ActivityPhase::Done);
+        assert_eq!(ev_eof.event, ActivityEventKind::End);
+        assert!(ev_eof.dismiss_immediately);
+
+        // 3. kill_session while Idle emits no exit activity
+        reg.create_session("s-idle", Some("sleep 30".into()), None, 80, 24)
+            .unwrap();
+        reg.apply_hook_signal("s-idle", "omp", AgentSignal::from_status(AgentStatus::Idle));
+        assert!(act_rx.try_recv().is_err());
+        reg.kill_session("s-idle").unwrap();
+        assert!(act_rx.try_recv().is_err());
+
+        // 4. remove after non-zero exit while Thinking emits Failed End with dismiss_immediately: false
+        reg.create_session("s-rem-fail", Some("sh -c 'exit 3'".into()), None, 80, 24)
+            .unwrap();
+        reg.apply_hook_signal(
+            "s-rem-fail",
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Thinking {
+                    task_desc: String::new(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Started,
+                resolution: SignalResolution::None,
+                seq: Some(1),
+                epoch: Some(1),
+            },
+        );
+        let _ = act_rx.try_recv().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while reg.get("s-rem-fail").unwrap().is_alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(reg.remove("s-rem-fail").is_some());
+        let ev_rem_fail = act_rx.try_recv().unwrap();
+        assert_eq!(ev_rem_fail.session_id, "s-rem-fail");
+        assert_eq!(ev_rem_fail.phase, ActivityPhase::Failed);
+        assert_eq!(ev_rem_fail.event, ActivityEventKind::End);
+        assert!(!ev_rem_fail.dismiss_immediately);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_tab_title_fallback_order() {
+        let session = PtySession::spawn(
+            80,
+            24,
+            PtySpawnOptions {
+                workdir: None,
+                launch_cmd: Some("true".into()),
+                env: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut entry = SessionEntry {
+            session,
+            cwd: PathBuf::from("/tmp/my-repo"),
+            git_root: None,
+            title: Some("  Custom Tab  ".into()),
+            revision: 1,
+            active_cmd: None,
+            last_active_ts: Arc::new(AtomicU64::new(0)),
+            tracker: AgentTracker::default(),
+            claim: None,
+            exit_alerted: false,
+            agent_stream: None,
+            respond_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("Custom Tab"));
+
+        entry.title = Some("   ".into());
+        assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("my-repo"));
+
+        entry.title = None;
+        assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("my-repo"));
+
+        entry.cwd = PathBuf::from("/");
+        assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("sess-1"));
     }
 }

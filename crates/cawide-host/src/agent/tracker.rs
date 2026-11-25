@@ -51,6 +51,7 @@ pub struct TrackerActivity {
     pub started_at: u64,
     pub prompt_id: Option<u64>,
     pub is_tool_step: bool,
+    pub dismiss_immediately: bool,
     pub detail: AlertDetail,
 }
 
@@ -643,6 +644,7 @@ impl AgentTracker {
                             started_at: new_turn_started_at.unwrap_or(now_secs),
                             prompt_id: None,
                             is_tool_step,
+                            dismiss_immediately: false,
                             detail: AlertDetail {
                                 prompt: (!task_desc.is_empty()).then(|| task_desc.clone()),
                                 ..Default::default()
@@ -668,6 +670,7 @@ impl AgentTracker {
                                 .unwrap_or(now_secs),
                             prompt_id: Some(head.id),
                             is_tool_step: false,
+                            dismiss_immediately: false,
                             detail: AlertDetail {
                                 actionable: head.actionable,
                                 prompt: Some(head.prompt.clone()),
@@ -685,6 +688,7 @@ impl AgentTracker {
                                 .unwrap_or(now_secs),
                             prompt_id: None,
                             is_tool_step: false,
+                            dismiss_immediately: false,
                             detail: AlertDetail {
                                 actionable: true,
                                 prompt: Some(prompt.clone()),
@@ -725,6 +729,7 @@ impl AgentTracker {
                             started_at: old_turn_started_at.unwrap_or(now_secs),
                             prompt_id,
                             is_tool_step: false,
+                            dismiss_immediately: false,
                             detail: AlertDetail {
                                 actionable: prompt_id.is_some_and(|id| id > 0),
                                 summary: (!summary.is_empty()).then(|| summary.clone()),
@@ -736,13 +741,10 @@ impl AgentTracker {
                     }
                 }
                 AgentStatus::Idle => {
-                    let was_active = old_state.as_ref().is_some_and(|old_s| {
-                        matches!(
-                            old_s.status,
-                            AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. }
-                        )
-                    });
-                    if was_active {
+                    let was_idle = old_state
+                        .as_ref()
+                        .is_some_and(|old_s| matches!(old_s.status, AgentStatus::Idle));
+                    if old_state.is_some() && !was_idle {
                         let failed_err = match outcome {
                             TurnOutcome::Failed { error } => Some(error.clone()),
                             _ => None,
@@ -759,6 +761,7 @@ impl AgentTracker {
                             started_at: old_turn_started_at.unwrap_or(now_secs),
                             prompt_id: None,
                             is_tool_step: false,
+                            dismiss_immediately: failed_err.is_none(),
                             detail: AlertDetail {
                                 error: failed_err,
                                 duration_secs,
@@ -770,26 +773,37 @@ impl AgentTracker {
                     }
                 }
             },
-            None => {
-                let was_active = old_state.as_ref().filter(|old_s| {
-                    matches!(
-                        old_s.status,
-                        AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. }
-                    )
-                });
-                was_active.map(|old_s| TrackerActivity {
+            None => old_state.as_ref().and_then(|old_s| match old_s.status {
+                AgentStatus::Thinking { .. } | AgentStatus::WaitingForInput { .. } => {
+                    Some(TrackerActivity {
+                        agent: old_s.agent.clone(),
+                        phase: ActivityPhase::Failed,
+                        event: ActivityEventKind::End,
+                        started_at: old_turn_started_at.unwrap_or(now_secs),
+                        prompt_id: None,
+                        is_tool_step: false,
+                        dismiss_immediately: false,
+                        detail: AlertDetail {
+                            duration_secs,
+                            ..Default::default()
+                        },
+                    })
+                }
+                AgentStatus::Completed { .. } => Some(TrackerActivity {
                     agent: old_s.agent.clone(),
-                    phase: ActivityPhase::Failed,
+                    phase: ActivityPhase::Done,
                     event: ActivityEventKind::End,
                     started_at: old_turn_started_at.unwrap_or(now_secs),
                     prompt_id: None,
                     is_tool_step: false,
+                    dismiss_immediately: true,
                     detail: AlertDetail {
                         duration_secs,
                         ..Default::default()
                     },
-                })
-            }
+                }),
+                AgentStatus::Idle => None,
+            }),
         };
 
         TrackerResult {
@@ -1504,5 +1518,252 @@ mod tests {
             AgentStatus::Thinking { .. }
         ));
         assert!(tracker.head_attention().is_none());
+    }
+
+    #[test]
+    fn test_idle_dismiss_immediately_transitions() {
+        let mut tracker = AgentTracker::default();
+
+        // None -> Idle emits no activity
+        let r0 = tracker.on_hook_signal(
+            "omp",
+            AgentSignal::from_status(AgentStatus::Idle),
+            100,
+            100_000,
+            0,
+        );
+        assert!(r0.activity.is_none());
+
+        // Idle -> Idle (same agent) emits no activity
+        let r_same = tracker.on_hook_signal(
+            "omp",
+            AgentSignal::from_status(AgentStatus::Idle),
+            101,
+            101_000,
+            0,
+        );
+        assert!(r_same.activity.is_none());
+
+        // Thinking -> Completed emits End with dismiss_immediately: false
+        tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Thinking {
+                    task_desc: "working".into(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Started,
+                resolution: SignalResolution::None,
+                seq: Some(1),
+                epoch: Some(1),
+            },
+            102,
+            102_000,
+            0,
+        );
+        let r_done = tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Completed {
+                    summary: "done".into(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Done,
+                resolution: SignalResolution::ClearNonPlan,
+                seq: Some(2),
+                epoch: Some(1),
+            },
+            105,
+            105_000,
+            0,
+        );
+        let act_done = r_done.activity.expect("completed activity");
+        assert_eq!(act_done.event, ActivityEventKind::End);
+        assert_eq!(act_done.phase, ActivityPhase::Done);
+        assert!(!act_done.dismiss_immediately);
+
+        // Completed -> Idle emits End with dismiss_immediately: true
+        let r_idle = tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Idle,
+                attention: None,
+                outcome: TurnOutcome::None,
+                resolution: SignalResolution::ClearAll,
+                seq: Some(3),
+                epoch: Some(1),
+            },
+            110,
+            110_000,
+            0,
+        );
+        let act_idle = r_idle.activity.expect("idle after completed activity");
+        assert_eq!(act_idle.event, ActivityEventKind::End);
+        assert_eq!(act_idle.phase, ActivityPhase::Done);
+        assert!(act_idle.dismiss_immediately);
+
+        // Thinking -> Idle emits End with dismiss_immediately: true
+        tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Thinking {
+                    task_desc: "step".into(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Started,
+                resolution: SignalResolution::None,
+                seq: Some(4),
+                epoch: Some(1),
+            },
+            120,
+            120_000,
+            0,
+        );
+        let r_abort = tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Idle,
+                attention: None,
+                outcome: TurnOutcome::Aborted,
+                resolution: SignalResolution::ClearAll,
+                seq: Some(5),
+                epoch: Some(1),
+            },
+            125,
+            125_000,
+            0,
+        );
+        let act_abort = r_abort.activity.expect("idle after thinking activity");
+        assert_eq!(act_abort.event, ActivityEventKind::End);
+        assert!(act_abort.dismiss_immediately);
+
+        // WaitingForInput -> Idle emits End with dismiss_immediately: true
+        tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::WaitingForInput {
+                    prompt: "Allow?".into(),
+                    options: vec!["Allow".into()],
+                },
+                attention: Some(AttentionSpec {
+                    key: Some("k1".into()),
+                    kind: AttentionKind::Approval,
+                    prompt: "Allow?".into(),
+                    options: vec!["Allow".into()],
+                    actionable: true,
+                }),
+                outcome: TurnOutcome::None,
+                resolution: SignalResolution::None,
+                seq: Some(6),
+                epoch: Some(1),
+            },
+            130,
+            130_000,
+            0,
+        );
+        let r_wait_idle = tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Idle,
+                attention: None,
+                outcome: TurnOutcome::None,
+                resolution: SignalResolution::ClearAll,
+                seq: Some(7),
+                epoch: Some(1),
+            },
+            135,
+            135_000,
+            0,
+        );
+        let act_wait_idle = r_wait_idle.activity.expect("idle after waiting activity");
+        assert_eq!(act_wait_idle.event, ActivityEventKind::End);
+        assert!(act_wait_idle.dismiss_immediately);
+
+        // Idle -> Idle across different agents emits no activity
+        let r_cross_idle = tracker.on_hook_signal(
+            "claude",
+            AgentSignal::from_status(AgentStatus::Idle),
+            136,
+            136_000,
+            0,
+        );
+        assert!(r_cross_idle.activity.is_none());
+
+        // Thinking -> Idle with TurnOutcome::Failed keeps dismiss_immediately: false
+        tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Thinking {
+                    task_desc: "failing".into(),
+                },
+                attention: None,
+                outcome: TurnOutcome::Started,
+                resolution: SignalResolution::None,
+                seq: Some(8),
+                epoch: Some(1),
+            },
+            140,
+            140_000,
+            0,
+        );
+        let r_fail_idle = tracker.on_hook_signal(
+            "omp",
+            AgentSignal {
+                status: AgentStatus::Idle,
+                attention: None,
+                outcome: TurnOutcome::Failed {
+                    error: "boom".into(),
+                },
+                resolution: SignalResolution::ClearAll,
+                seq: Some(9),
+                epoch: Some(1),
+            },
+            145,
+            145_000,
+            0,
+        );
+        let act_fail_idle = r_fail_idle.activity.expect("failed idle activity");
+        assert_eq!(act_fail_idle.event, ActivityEventKind::End);
+        assert_eq!(act_fail_idle.phase, ActivityPhase::Failed);
+        assert!(!act_fail_idle.dismiss_immediately);
+
+        // Thinking -> None (agent disappeared in probe) emits Failed End with dismiss_immediately: false
+        let mut probe_tracker = AgentTracker::default();
+        probe_tracker.on_probe(Some(Foreground::Agent("claude")), true, 200);
+        let r_gone = probe_tracker.on_probe_signals(
+            Some(Foreground::Shell),
+            &TerminalSignals {
+                title: None,
+                progress_active: false,
+                run_status: None,
+            },
+            205,
+            205_000,
+        );
+        let act_gone = r_gone.activity.expect("disappeared activity");
+        assert_eq!(act_gone.event, ActivityEventKind::End);
+        assert_eq!(act_gone.phase, ActivityPhase::Failed);
+        assert!(!act_gone.dismiss_immediately);
+
+        // Completed -> None (agent exited back to shell in probe) emits Done End with dismiss_immediately: true
+        let mut completed_probe_tracker = AgentTracker::default();
+        completed_probe_tracker.on_probe(Some(Foreground::Agent("claude")), true, 300);
+        completed_probe_tracker.on_probe(Some(Foreground::Agent("claude")), false, 302);
+        let r_shell_after_done = completed_probe_tracker.on_probe_signals(
+            Some(Foreground::Shell),
+            &TerminalSignals {
+                title: None,
+                progress_active: false,
+                run_status: None,
+            },
+            305,
+            305_000,
+        );
+        let act_shell_done = r_shell_after_done
+            .activity
+            .expect("completed cleared by shell activity");
+        assert_eq!(act_shell_done.event, ActivityEventKind::End);
+        assert_eq!(act_shell_done.phase, ActivityPhase::Done);
+        assert!(act_shell_done.dismiss_immediately);
     }
 }

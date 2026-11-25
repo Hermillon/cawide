@@ -119,6 +119,7 @@ pub struct ActivityUpdateEvent {
     pub started_at: u64,
     pub prompt_id: Option<u64>,
     pub is_tool_step: bool,
+    pub dismiss_immediately: bool,
     pub detail: AlertDetail,
 }
 
@@ -399,6 +400,9 @@ pub fn build_activity_payload(
     body.insert("session_id".into(), serde_json::json!(ev.session_id));
     body.insert("event".into(), serde_json::json!(ev.event.as_str()));
     body.insert("ts".into(), serde_json::json!(ev.ts));
+    if ev.dismiss_immediately && ev.event == ActivityEventKind::End {
+        body.insert("dismiss_immediately".into(), serde_json::json!(true));
+    }
     body.insert(
         "content_state".into(),
         serde_json::Value::Object(content_state),
@@ -1753,6 +1757,7 @@ mod tests {
             started_at: 1764000000,
             prompt_id: None,
             is_tool_step: false,
+            dismiss_immediately: false,
             detail: AlertDetail {
                 project: Some("cawide".into()),
                 session_title: Some("main".into()),
@@ -1807,6 +1812,26 @@ mod tests {
         };
         let no_pts_body = build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_update).unwrap();
         assert!(no_pts_body.get("start_attributes").is_none());
+
+        // dismiss_immediately is emitted only when true and event == End
+        assert!(body.get("dismiss_immediately").is_none());
+        assert!(end_body.get("dismiss_immediately").is_none());
+
+        let ev_end_immediate = ActivityUpdateEvent {
+            dismiss_immediately: true,
+            ..ev_end
+        };
+        let end_imm_body =
+            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_end_immediate).unwrap();
+        assert_eq!(end_imm_body["dismiss_immediately"], true);
+
+        let ev_update_immediate = ActivityUpdateEvent {
+            dismiss_immediately: true,
+            ..ev_update
+        };
+        let upd_imm_body =
+            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_update_immediate).unwrap();
+        assert!(upd_imm_body.get("dismiss_immediately").is_none());
     }
 
     #[tokio::test]
@@ -1898,6 +1923,7 @@ mod tests {
             started_at: 100,
             prompt_id: None,
             is_tool_step: false,
+            dismiss_immediately: false,
             detail: AlertDetail::default(),
         })
         .await
@@ -1912,6 +1938,7 @@ mod tests {
             started_at: 100,
             prompt_id: None,
             is_tool_step: true,
+            dismiss_immediately: false,
             detail: AlertDetail {
                 prompt: Some("Read a.rs".into()),
                 ..Default::default()
@@ -1929,6 +1956,7 @@ mod tests {
             started_at: 100,
             prompt_id: None,
             is_tool_step: true,
+            dismiss_immediately: false,
             detail: AlertDetail {
                 prompt: Some("Edit b.rs".into()),
                 ..Default::default()
@@ -1946,6 +1974,7 @@ mod tests {
             started_at: 100,
             prompt_id: Some(7),
             is_tool_step: false,
+            dismiss_immediately: false,
             detail: AlertDetail {
                 actionable: true,
                 prompt: Some("Allow?".into()),
@@ -1983,6 +2012,7 @@ mod tests {
             started_at: 100,
             prompt_id: None,
             is_tool_step: false,
+            dismiss_immediately: false,
             detail: AlertDetail::default(),
         })
         .await
@@ -2022,6 +2052,7 @@ mod tests {
             started_at: 100,
             prompt_id: None,
             is_tool_step: false,
+            dismiss_immediately: false,
             detail: AlertDetail::default(),
         };
         assert!(build_activity_payload(&bad_ch, "node1", "Mac", &ev).is_err());
