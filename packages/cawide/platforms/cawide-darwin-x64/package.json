@@ -1,6 +1,6 @@
 {
   "name": "cawide-darwin-x64",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Prebuilt cawide binary for darwin/x64 (x86_64-apple-darwin)",
   "homepage": "https://cawide.dev",
   "license": "Apache-2.0",
