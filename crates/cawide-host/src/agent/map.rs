@@ -369,148 +369,6 @@ fn map_codex(event: Option<&str>, payload: &serde_json::Value) -> Option<AgentSt
     }
 }
 
-fn strip_fenced_code_blocks(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut fence: Option<(char, usize)> = None;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some((ch, min_len)) = fence {
-            let count = trimmed.chars().take_while(|&c| c == ch).count();
-            if count >= min_len && trimmed[count * ch.len_utf8()..].trim().is_empty() {
-                fence = None;
-            }
-            continue;
-        }
-        if let Some(first) = trimmed.chars().next() {
-            if first == '`' || first == '~' {
-                let count = trimmed.chars().take_while(|&c| c == first).count();
-                if count >= 3 {
-                    fence = Some((first, count));
-                    continue;
-                }
-            }
-        }
-        out.push(line.to_string());
-    }
-    out
-}
-
-fn is_trailing_decoration(c: char) -> bool {
-    c.is_whitespace()
-        || matches!(
-            c,
-            '*' | '_' | '`' | '~' | '"' | '\'' | '”' | '’' | '»' | '›' | '」' | '』'
-        )
-        || matches!(
-            c,
-            '\u{FE0E}'
-                | '\u{FE0F}'
-                | '\u{200D}'
-                | '\u{20E3}'
-                | '\u{1F3FB}'..='\u{1F3FF}'
-                | '\u{1F000}'..='\u{1FAFF}'
-                | '\u{2600}'..='\u{27BF}'
-                | '\u{2300}'..='\u{23FF}'
-        )
-}
-
-fn strip_trailing_decorations(s: &str) -> &str {
-    s.trim_end_matches(is_trailing_decoration)
-}
-
-fn ends_with_yn(cleaned: &str) -> bool {
-    let bytes = cleaned.as_bytes();
-    bytes.len() >= 5 && {
-        let tail = &bytes[bytes.len() - 5..];
-        tail.eq_ignore_ascii_case(b"(y/n)") || tail.eq_ignore_ascii_case(b"[y/n]")
-    }
-}
-
-pub fn is_text_question(text: &str) -> bool {
-    let lines = strip_fenced_code_blocks(text);
-    let Some(last_para) = last_non_empty_paragraph(&lines) else {
-        return false;
-    };
-    let cleaned = strip_trailing_decorations(&last_para);
-    cleaned.ends_with('?') || cleaned.ends_with('？') || ends_with_yn(cleaned)
-}
-
-fn last_non_empty_paragraph(lines: &[String]) -> Option<String> {
-    let end = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    let mut start = end;
-    while start > 0 && !lines[start - 1].trim().is_empty() {
-        start -= 1;
-    }
-    Some(
-        lines[start..=end]
-            .iter()
-            .map(|l| l.trim())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-}
-
-fn parse_list_item(line: &str) -> Option<&str> {
-    let trimmed = line.trim();
-    for prefix in ["- ", "* ", "+ "] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            let item = rest.trim();
-            if !item.is_empty() {
-                return Some(item);
-            }
-        }
-    }
-    let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if digits > 0 {
-        let after_digits = &trimmed[digits..];
-        if let Some(rest) = after_digits
-            .strip_prefix(". ")
-            .or_else(|| after_digits.strip_prefix(") "))
-        {
-            let item = rest.trim();
-            if !item.is_empty() {
-                return Some(item);
-            }
-        }
-    }
-    None
-}
-
-fn extract_text_question(text: &str) -> Option<(String, Vec<String>)> {
-    let lines = strip_fenced_code_blocks(text);
-    let end = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    let mut start = end;
-    while start > 0 && !lines[start - 1].trim().is_empty() {
-        start -= 1;
-    }
-    let last_para = lines[start..=end]
-        .iter()
-        .map(|l| l.trim())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let cleaned = strip_trailing_decorations(&last_para);
-    let is_q = cleaned.ends_with('?') || cleaned.ends_with('？') || ends_with_yn(cleaned);
-    if !is_q {
-        return None;
-    }
-
-    let mut options = Vec::new();
-    if let Some(mut idx) = lines[..start].iter().rposition(|l| !l.trim().is_empty()) {
-        let mut rev_items = Vec::new();
-        while let Some(item) = parse_list_item(&lines[idx]) {
-            rev_items.push(truncate_chars(item, 80));
-            if idx == 0 {
-                break;
-            }
-            idx -= 1;
-        }
-        rev_items.reverse();
-        options = rev_items.into_iter().take(4).collect();
-    }
-
-    Some((truncate_chars(&last_para, 600), options))
-}
-
 fn summarize_head(head: &str) -> String {
     let mut out = String::new();
     for line in head.lines() {
@@ -892,31 +750,6 @@ fn map_omp_signal(event: Option<&str>, payload: &serde_json::Value) -> Option<Ag
                     status: AgentStatus::Idle,
                     attention: None,
                     outcome: TurnOutcome::Aborted,
-                    resolution: SignalResolution::ClearNonPlan,
-                    seq: None,
-                    epoch: None,
-                });
-            }
-
-            let final_text_tail = payload
-                .get("finalTextTail")
-                .or_else(|| payload.get("finalText"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if let Some((prompt, options)) = extract_text_question(final_text_tail) {
-                return Some(AgentSignal {
-                    status: AgentStatus::WaitingForInput {
-                        prompt: prompt.clone(),
-                        options: options.clone(),
-                    },
-                    attention: Some(AttentionSpec {
-                        key: None,
-                        kind: AttentionKind::TextQuestion,
-                        prompt,
-                        options,
-                        actionable: true,
-                    }),
-                    outcome: TurnOutcome::None,
                     resolution: SignalResolution::ClearNonPlan,
                     seq: None,
                     epoch: None,
@@ -1474,32 +1307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_text_question_table() {
-        let cases = [
-            ("Should I proceed?", true),
-            ("Should I proceed？", true),
-            ("Continue? **", true),
-            ("Ready to deploy? 🚀", true),
-            ("\"Should we merge?\"", true),
-            ("Proceed (y/n)", true),
-            ("Proceed [y/N]", true),
-            ("Proceed [Y/n]", true),
-            ("Wait — why?\n\nAll tests pass now.", false),
-            ("```rust\nfn foo() -> Option<i32> { bar()? }\n```", false),
-            ("Here is the code:\n```js\nconst x = a ? b : c;\n```", false),
-            ("Done.", false),
-            ("", false),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                is_text_question(input),
-                expected,
-                "is_text_question mismatch for {input:?}"
-            );
-        }
-    }
-
-    #[test]
     fn test_omp_map_signal_full() {
         let sig = map_signal(
             "omp",
@@ -1665,30 +1472,6 @@ mod tests {
         assert_eq!(abort_end.status, AgentStatus::Idle);
         assert_eq!(abort_end.outcome, TurnOutcome::Aborted);
 
-        let q_end = map_signal(
-            "omp",
-            Some("agent_end"),
-            &json!({
-                "finalTextTail": "Options:\n- Fast\n- Safe\n- Minimal\n- Full\n- Extra\n\nWhich mode should I use?"
-            }),
-        )
-        .unwrap();
-        assert_eq!(
-            q_end.attention,
-            Some(AttentionSpec {
-                key: None,
-                kind: AttentionKind::TextQuestion,
-                prompt: "Which mode should I use?".into(),
-                options: vec![
-                    "Fast".into(),
-                    "Safe".into(),
-                    "Minimal".into(),
-                    "Full".into()
-                ],
-                actionable: true,
-            })
-        );
-
         let done_end = map_signal(
             "omp",
             Some("agent_end"),
@@ -1752,10 +1535,35 @@ mod tests {
     }
 
     #[test]
-    fn test_is_text_question_multibyte_utf8_no_panic() {
-        assert!(!is_text_question("你好吗完了。"));
-        assert!(is_text_question("继续吗(y/n)"));
-        assert!(extract_text_question("你好吗完了。").is_none());
-        assert!(extract_text_question("继续吗[Y/n]").is_some());
+    fn test_omp_agent_end_never_infers_text_question() {
+        let cases = [
+            "Should I proceed?",
+            "Proceed (y/n)",
+            "Continue [Y/n]",
+            "Options:\n- Fast\n- Safe\n- Minimal\n\nWhich mode should I use?",
+        ];
+        for text in cases {
+            let sig = map_signal(
+                "omp",
+                Some("agent_end"),
+                &json!({
+                    "finalTextHead": text,
+                    "finalTextTail": text,
+                }),
+            )
+            .unwrap();
+            assert!(
+                !matches!(sig.status, AgentStatus::WaitingForInput { .. }),
+                "agent_end must never infer WaitingForInput for {text:?}"
+            );
+            assert!(
+                matches!(sig.status, AgentStatus::Completed { .. }),
+                "expected Completed for {text:?}, got {:?}",
+                sig.status
+            );
+            assert_eq!(sig.attention, None);
+            assert_eq!(sig.outcome, TurnOutcome::Done);
+            assert_eq!(sig.resolution, SignalResolution::ClearNonPlan);
+        }
     }
 }
