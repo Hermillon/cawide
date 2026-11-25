@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-11-25
+
+### Changed
+- Unified `tab_title` fallback (`entry.title` -> `cwd` basename -> `session_id`) across alerts and Live Activity payloads.
+
+### Fixed
+- Emit `dismiss_immediately` on Live Activity `End` payloads for `kill_session`, `remove`, `remove_if_same`, `kill_all`, clean EOF exits, shell return after completion, and `Idle` transitions.
+
 ## [0.15.0] - 2026-11-24
 
 ### Added
