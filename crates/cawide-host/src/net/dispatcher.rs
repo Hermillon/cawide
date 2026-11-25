@@ -38,6 +38,13 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub(crate) fn reset_stream(send: &mut SendStream, recv: &mut RecvStream, code: u32) {
     let code = VarInt::from_u32(code);
     let _ = send.reset(code);
@@ -91,31 +98,176 @@ pub struct CawidePairingHandler {
     pub pairing_manager: Arc<PairingManager>,
     pub auth_store: Arc<AuthorizedKeysStore>,
     pub host_name: Arc<str>,
+    pub host_secret: [u8; 32],
+    pub node_id: [u8; 32],
+    /// Wakes `TrustSync` immediately after a managed binding is established.
+    pub trust_wake: Arc<tokio::sync::Notify>,
+    pub connections: Arc<ConnectionTracker>,
+}
+
+enum PairingOutcome {
+    Accepted {
+        resp: ControlMessage,
+        wake_trust: bool,
+    },
+    Refused(ControlMessage),
 }
 
 impl CawidePairingHandler {
-    fn evaluate(&self, conn: &Connection, msg: Option<ControlMessage>) -> Result<(), String> {
-        let Some(ControlMessage::PairRequest {
-            pairing_secret,
-            client_node_id,
-            device_name,
-        }) = msg
-        else {
-            return Err("expected PairRequest".into());
-        };
-        if client_node_id != *conn.remote_id().as_bytes() {
-            return Err("client_node_id does not match TLS identity".into());
-        }
-        validate_device_name(&device_name).map_err(|e| e.to_string())?;
-        self.pairing_manager
-            .verify_and_consume(&pairing_secret)
-            .map_err(|_| "invalid or expired pairing secret".to_string())?;
-        match self.auth_store.add_key(client_node_id, device_name) {
-            Ok(()) | Err(AuthError::KeyAlreadyAuthorized(_)) => {
-                tracing::info!(remote = %conn.remote_id().fmt_short(), "device paired");
-                Ok(())
+    async fn evaluate(&self, conn: &Connection, msg: Option<ControlMessage>) -> PairingOutcome {
+        match msg {
+            Some(ControlMessage::PairRequest {
+                pairing_secret,
+                client_node_id,
+                device_name,
+            }) => {
+                if self.auth_store.is_managed() {
+                    return PairingOutcome::Refused(ControlMessage::PairResponse {
+                        success: false,
+                        error: Some("Update Cawide and pair from your account".into()),
+                        host_name: None,
+                    });
+                }
+                if client_node_id != *conn.remote_id().as_bytes() {
+                    return PairingOutcome::Refused(ControlMessage::PairResponse {
+                        success: false,
+                        error: Some("client_node_id does not match TLS identity".into()),
+                        host_name: None,
+                    });
+                }
+                if let Err(e) = validate_device_name(&device_name) {
+                    return PairingOutcome::Refused(ControlMessage::PairResponse {
+                        success: false,
+                        error: Some(e.to_string()),
+                        host_name: None,
+                    });
+                }
+                if self
+                    .pairing_manager
+                    .verify_and_consume(&pairing_secret)
+                    .is_err()
+                {
+                    return PairingOutcome::Refused(ControlMessage::PairResponse {
+                        success: false,
+                        error: Some("invalid or expired pairing secret".into()),
+                        host_name: None,
+                    });
+                }
+                match self.auth_store.add_key(client_node_id, device_name) {
+                    Ok(()) | Err(AuthError::KeyAlreadyAuthorized(_)) => {
+                        tracing::info!(remote = %conn.remote_id().fmt_short(), "device paired");
+                        PairingOutcome::Accepted {
+                            resp: ControlMessage::PairResponse {
+                                success: true,
+                                error: None,
+                                host_name: Some(self.host_name.to_string()),
+                            },
+                            wake_trust: false,
+                        }
+                    }
+                    Err(e) => PairingOutcome::Refused(ControlMessage::PairResponse {
+                        success: false,
+                        error: Some(e.to_string()),
+                        host_name: None,
+                    }),
+                }
             }
-            Err(e) => Err(e.to_string()),
+            Some(ControlMessage::PairManagedRequest {
+                pairing_secret,
+                client_node_id,
+                device_name,
+                account_id,
+                epoch,
+                nonce,
+            }) => {
+                if client_node_id != *conn.remote_id().as_bytes() {
+                    return PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                        result: Err("client_node_id does not match TLS identity".into()),
+                        host_name: None,
+                    });
+                }
+                if let Err(e) = validate_device_name(&device_name) {
+                    return PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                        result: Err(e.to_string()),
+                        host_name: None,
+                    });
+                }
+                if let Err(e) = cawide_account::validate_account_id(&account_id) {
+                    return PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                        result: Err(e.to_string()),
+                        host_name: None,
+                    });
+                }
+                if let Err(e) = ed25519_dalek::VerifyingKey::from_bytes(&client_node_id) {
+                    return PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                        result: Err(AuthError::InvalidPublicKey(e.to_string()).to_string()),
+                        host_name: None,
+                    });
+                }
+                let body = cawide_account::ManagedClaimBody {
+                    account_id: account_id.clone(),
+                    host: self.node_id,
+                    claimer: client_node_id,
+                    epoch,
+                    nonce,
+                    fresh_pair: true,
+                };
+                let host_sig =
+                    cawide_account::sign(&self.host_secret, &body.host_signing_message()).to_vec();
+                let proof = cawide_account::ManagedHostProof { body, host_sig };
+                let proof_bytes = match postcard::to_allocvec(&proof) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                            result: Err(e.to_string()),
+                            host_name: None,
+                        });
+                    }
+                };
+                if self
+                    .pairing_manager
+                    .verify_and_consume(&pairing_secret)
+                    .is_err()
+                {
+                    return PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                        result: Err("invalid or expired pairing secret".into()),
+                        host_name: None,
+                    });
+                }
+                let now = unix_secs();
+                let store = Arc::clone(&self.auth_store);
+                let pair_res = tokio::task::spawn_blocking(move || {
+                    store.begin_managed_pair(client_node_id, device_name, &account_id, epoch, now)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("managed pair task failed: {e}")));
+                match pair_res {
+                    Ok(close_old) => {
+                        if close_old {
+                            self.connections.close_all_connections(
+                                cawide_protocol::CLOSE_UNAUTHORIZED,
+                                b"managed enrollment",
+                            );
+                        }
+                        PairingOutcome::Accepted {
+                            resp: ControlMessage::PairManagedResponse {
+                                result: Ok(proof_bytes),
+                                host_name: Some(self.host_name.to_string()),
+                            },
+                            wake_trust: true,
+                        }
+                    }
+                    Err(e) => PairingOutcome::Refused(ControlMessage::PairManagedResponse {
+                        result: Err(e),
+                        host_name: None,
+                    }),
+                }
+            }
+            _ => PairingOutcome::Refused(ControlMessage::PairResponse {
+                success: false,
+                error: Some("expected PairRequest or PairManagedRequest".into()),
+                host_name: None,
+            }),
         }
     }
 }
@@ -138,19 +290,11 @@ impl ProtocolHandler for CawidePairingHandler {
             .await?
             .map_err(|e| AcceptError::from_err(NetError::Protocol(e)))?;
 
-        let response = match self.evaluate(&conn, msg) {
-            Ok(()) => ControlMessage::PairResponse {
-                success: true,
-                error: None,
-                host_name: Some(self.host_name.to_string()),
-            },
-            Err(reason) => {
-                tracing::warn!(remote = %conn.remote_id().fmt_short(), %reason, "pairing refused");
-                ControlMessage::PairResponse {
-                    success: false,
-                    error: Some(reason),
-                    host_name: None,
-                }
+        let (response, wake_trust) = match self.evaluate(&conn, msg).await {
+            PairingOutcome::Accepted { resp, wake_trust } => (resp, wake_trust),
+            PairingOutcome::Refused(resp) => {
+                tracing::warn!(remote = %conn.remote_id().fmt_short(), "pairing refused");
+                (resp, false)
             }
         };
         step("pairing", write_control_message(&mut send, &response))
@@ -158,6 +302,9 @@ impl ProtocolHandler for CawidePairingHandler {
             .map_err(|e| AcceptError::from_err(NetError::Protocol(e)))?;
 
         let _ = send.finish();
+        if wake_trust {
+            self.trust_wake.notify_one();
+        }
         // The client closes after reading the response; never close before it is delivered.
         let _ = tokio::time::timeout(HANDSHAKE_STEP_TIMEOUT, conn.closed()).await;
         Ok(())
@@ -178,14 +325,21 @@ pub struct CawideProtocolHandler {
     pub git_host_env: Arc<crate::rpc::git::env::GitHostEnv>,
     pub push: Arc<crate::push::PushService>,
     pub account: Arc<crate::cloud::trust_sync::AccountClaimer>,
+    pub auth_store: Arc<AuthorizedKeysStore>,
+    pub host_secret: [u8; 32],
+    pub node_id: [u8; 32],
+    /// Wakes `TrustSync` immediately after a managed adoption is established.
+    pub trust_wake: Arc<tokio::sync::Notify>,
 }
 
 /// Per-connection state shared by that connection's stream tasks.
 struct ConnState {
     attached: parking_lot::Mutex<HashSet<String>>,
     size: parking_lot::Mutex<Option<(u16, u16)>>,
+    adoption_draining: std::sync::atomic::AtomicBool,
+    conn_id: usize,
+    conn: Connection,
 }
-
 fn resize_session_locked(size: Option<(u16, u16)>, session: &PtySession, id: &str) {
     if let Some((cols, rows)) = size {
         if let Err(e) = session.resize(cols, rows) {
@@ -198,12 +352,31 @@ impl ProtocolHandler for CawideProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let node_id = *conn.remote_id().as_bytes();
         let conn_id = self.connections.register(node_id, conn.clone());
+        if !self.auth_store.is_session_authorized(&node_id) {
+            conn.close(
+                VarInt::from_u32(cawide_protocol::CLOSE_UNAUTHORIZED),
+                b"unauthorized node id",
+            );
+            self.connections.unregister(node_id, conn_id);
+            return Ok(());
+        }
         let state = Arc::new(ConnState {
             attached: parking_lot::Mutex::new(HashSet::new()),
             size: parking_lot::Mutex::new(None),
+            adoption_draining: std::sync::atomic::AtomicBool::new(false),
+            conn_id,
+            conn: conn.clone(),
         });
         let mut tasks = tokio::task::JoinSet::new();
         while let Ok((send, recv)) = conn.accept_bi().await {
+            if state
+                .adoption_draining
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                let (mut send, mut recv) = (send, recv);
+                reset_stream(&mut send, &mut recv, STREAM_ERR_PROTOCOL);
+                continue;
+            }
             tasks.spawn(handle_stream(
                 self.clone(),
                 node_id,
@@ -248,20 +421,7 @@ async fn handle_stream(
             handle_control_stream(handler.registry, state, &handler.broadcaster, send, recv).await
         }
         StreamPurpose::Rpc => {
-            handle_rpc_stream(
-                node_id,
-                &handler.registry,
-                &handler.fs_engine,
-                &handler.broadcaster,
-                &handler.forge_service,
-                &handler.git_host_env,
-                &handler.push,
-                &handler.account,
-                &state,
-                send,
-                recv,
-            )
-            .await;
+            handle_rpc_stream(&handler, node_id, &state, send, recv).await;
         }
         StreamPurpose::Tunnel => {
             let _ = send.set_priority(0);
@@ -756,14 +916,8 @@ async fn control_writer(
 /// Serves RPC requests sequentially; clients open more RPC streams for parallelism.
 #[allow(clippy::too_many_arguments)]
 async fn handle_rpc_stream(
+    handler: &CawideProtocolHandler,
     client_node_id: [u8; 32],
-    registry: &SessionRegistry,
-    fs_engine: &FsEngine,
-    broadcaster: &HostEventBroadcaster,
-    forge: &crate::forge::ForgeService,
-    git_host_env: &crate::rpc::git::env::GitHostEnv,
-    push: &crate::push::PushService,
-    account: &Arc<crate::cloud::trust_sync::AccountClaimer>,
     state: &ConnState,
     mut send: SendStream,
     mut recv: RecvStream,
@@ -785,20 +939,109 @@ async fn handle_rpc_stream(
                 return;
             }
         };
+
+        if state
+            .adoption_draining
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            reset_stream(&mut send, &mut recv, STREAM_ERR_PROTOCOL);
+            return;
+        }
+
+        if let RpcRequest::AccountAdopt {
+            account_id,
+            epoch,
+            nonce,
+        } = frame.payload
+        {
+            let request_id = frame.request_id;
+            if handler.auth_store.is_managed() {
+                let resp = RpcResponse::AccountAdopt(Err(
+                    "Update Cawide and pair from your account".into(),
+                ));
+                let _ = write_rpc_response_with_caps(&mut send, request_id, &resp, caps).await;
+                continue;
+            }
+            let body = cawide_account::ManagedClaimBody {
+                account_id: account_id.clone(),
+                host: handler.node_id,
+                claimer: client_node_id,
+                epoch: 0,
+                nonce,
+                fresh_pair: false,
+            };
+            let host_sig =
+                cawide_account::sign(&handler.host_secret, &body.host_signing_message()).to_vec();
+            let proof = cawide_account::ManagedHostProof { body, host_sig };
+            let proof_bytes = match postcard::to_allocvec(&proof) {
+                Ok(b) => b,
+                Err(e) => {
+                    let resp = RpcResponse::AccountAdopt(Err(e.to_string()));
+                    let _ = write_rpc_response_with_caps(&mut send, request_id, &resp, caps).await;
+                    continue;
+                }
+            };
+            let now = unix_secs();
+            let auth_res = {
+                let store = Arc::clone(&handler.auth_store);
+                let acct = account_id;
+                tokio::task::spawn_blocking(move || {
+                    store.begin_managed_adopt(&client_node_id, &acct, epoch, now)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("adopt task failed: {e}")))
+            };
+
+            match auth_res {
+                Ok(()) => {
+                    handler.connections.close_all_except(
+                        state.conn_id,
+                        cawide_protocol::CLOSE_UNAUTHORIZED,
+                        b"adoption draining",
+                    );
+                    state
+                        .adoption_draining
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let resp = RpcResponse::AccountAdopt(Ok(proof_bytes));
+                    let _ = write_rpc_response_with_caps(&mut send, request_id, &resp, caps).await;
+                    let _ = send.flush().await;
+                    let _ = send.finish();
+                    handler.trust_wake.notify_one();
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        tokio::select! {
+                            _ = send.stopped() => {},
+                             _ = state.conn.closed() => {},
+                        }
+                    })
+                    .await;
+                    state.conn.close(
+                        VarInt::from_u32(cawide_protocol::CLOSE_UNAUTHORIZED),
+                        b"adoption complete",
+                    );
+                    return;
+                }
+                Err(e) => {
+                    let resp = RpcResponse::AccountAdopt(Err(e));
+                    let _ = write_rpc_response_with_caps(&mut send, request_id, &resp, caps).await;
+                    continue;
+                }
+            }
+        }
+
         let resp = dispatch_rpc(
             client_node_id,
-            registry,
-            fs_engine,
-            broadcaster,
-            forge,
-            git_host_env,
-            push,
-            account,
+            &handler.registry,
+            &handler.fs_engine,
+            &handler.broadcaster,
+            &handler.forge_service,
+            &handler.git_host_env,
+            &handler.push,
+            &handler.account,
+            &handler.auth_store,
             state,
             frame.payload,
         )
         .await;
-
         let request_id = frame.request_id;
         let is_bulk = matches!(
             &resp,
@@ -855,6 +1098,7 @@ async fn dispatch_rpc(
     git_host_env: &crate::rpc::git::env::GitHostEnv,
     push: &crate::push::PushService,
     account: &Arc<crate::cloud::trust_sync::AccountClaimer>,
+    auth_store: &AuthorizedKeysStore,
     state: &ConnState,
     req: RpcRequest,
 ) -> RpcResponse {
@@ -1003,6 +1247,11 @@ async fn dispatch_rpc(
             account_id,
             takeover,
         } => {
+            if auth_store.is_managed() {
+                return RpcResponse::AccountClaim(Err(
+                    "Update Cawide and pair from your account".into()
+                ));
+            }
             let account = Arc::clone(account);
             RpcResponse::AccountClaim(
                 tokio::task::spawn_blocking(move || {
@@ -1011,6 +1260,9 @@ async fn dispatch_rpc(
                 .await
                 .unwrap_or_else(|e| Err(format!("claim task failed: {e}"))),
             )
+        }
+        RpcRequest::AccountAdopt { .. } => {
+            RpcResponse::AccountAdopt(Err("unexpected adopt call in dispatch".into()))
         }
         RpcRequest::SetPushChannelV2 { channel } => {
             RpcResponse::SetPushChannelV2(push.set_channel_v2(client_node_id, channel).await)

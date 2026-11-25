@@ -41,7 +41,7 @@ impl iroh::endpoint::EndpointHooks for CawideEndpointHooks {
         let alpn = conn.alpn();
         match alpn {
             a if a == ALPN_CAWIDE => {
-                if self.auth_store.is_authorized(remote.as_bytes()) {
+                if self.auth_store.is_session_authorized(remote.as_bytes()) {
                     tracing::debug!(remote = %remote.fmt_short(), "accepted authorized connection");
                     iroh::endpoint::AfterHandshakeOutcome::Accept
                 } else {

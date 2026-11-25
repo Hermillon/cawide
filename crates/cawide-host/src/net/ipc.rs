@@ -110,6 +110,7 @@ pub struct IpcContext {
     pub broadcaster: Arc<HostEventBroadcaster>,
     pub connections: Arc<ConnectionTracker>,
     pub trust: Option<Arc<crate::cloud::trust_sync::TrustSync>>,
+    pub push: Arc<crate::push::PushService>,
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -465,9 +466,18 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
                     Err(e) => IpcResponse::Error(e.to_string()),
                 }
             } else {
+                let was_managed = ctx.auth_store.is_managed();
                 let store = Arc::clone(&ctx.auth_store);
                 match tokio::task::spawn_blocking(move || store.mark_unlinked_local(true)).await {
                     Ok(Ok((was_linked, removed))) => {
+                        if was_managed {
+                            // Managed revocation: every transport stream must end, not just removed keys.
+                            ctx.connections.close_all_connections(
+                                cawide_protocol::CLOSE_UNAUTHORIZED,
+                                b"account unlinked",
+                            );
+                            ctx.auth_store.revoke_lease();
+                        }
                         for pk in removed {
                             ctx.connections.close_all(
                                 pk,
@@ -475,9 +485,20 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
                                 b"account unlinked",
                             );
                         }
+                        ctx.push.prune_channels().await;
                         IpcResponse::Unlinked { was_linked }
                     }
-                    Ok(Err(e)) => IpcResponse::Error(e.to_string()),
+                    Ok(Err(e)) => {
+                        if was_managed {
+                            ctx.connections.close_all_connections(
+                                cawide_protocol::CLOSE_UNAUTHORIZED,
+                                b"account unlinked",
+                            );
+                            ctx.auth_store.revoke_lease();
+                            ctx.push.prune_channels().await;
+                        }
+                        IpcResponse::Error(e.to_string())
+                    }
                     Err(e) => IpcResponse::Error(format!("unlink task failed: {e}")),
                 }
             };

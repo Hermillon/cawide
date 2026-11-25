@@ -1,8 +1,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cawide_account::{
-    sign, DeviceLink, DeviceLinkBody, HostTrustSnapshot, SnapshotDevice, SnapshotRevocation,
+    sign, DeviceLink, DeviceLinkBody, HostTrustSnapshot, ManagedHostSyncResponse as Resp,
+    SnapshotDevice, SnapshotRevocation,
 };
+use cawide_host::auth::{ManagedSyncOutcome, LEASE_SECS};
 use cawide_host::{AuthError, AuthorizedKeysStore, KeySource};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
@@ -827,4 +829,209 @@ fn test_open_filters_local_denied_and_unlinked_account_keys() {
     std::fs::write(&trust_path, serde_json::to_vec(&json).unwrap()).unwrap();
     let reopened2 = AuthorizedKeysStore::open_or_create(path).unwrap();
     assert!(!reopened2.is_authorized(&pk2));
+}
+
+// ---------------------------------------------------------------------------
+// Managed binding (§1.1-§1.6)
+// ---------------------------------------------------------------------------
+
+fn future_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(LEASE_SECS)
+}
+
+/// Enrolls `client` as a managed device of `account_id` at `epoch`. Returns whether the
+/// binding was replaced (the caller must close existing connections).
+fn managed_enroll(
+    store: &AuthorizedKeysStore,
+    client: [u8; 32],
+    account_id: &str,
+    epoch: u64,
+) -> bool {
+    store
+        .begin_managed_pair(client, "Phone".into(), account_id, epoch, now_secs())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn managed_pending_response_grants_no_lease_and_exact_epoch_gates_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AuthorizedKeysStore::open_or_create(dir.path().join("authorized_keys")).unwrap();
+    let (_sk, pk) = gen_key();
+    assert!(managed_enroll(&store, pk, "acct-1", 3));
+    assert_eq!(store.managed_sync_target(), Some(("acct-1".into(), 3)));
+
+    // A response for a different epoch or account is stale and never renews anything.
+    let stale = store
+        .apply_managed_sync("acct-1", 2, Resp::Pending, future_deadline(), now_secs())
+        .unwrap();
+    assert!(matches!(stale, ManagedSyncOutcome::Stale));
+    let wrong_account = store
+        .apply_managed_sync("acct-9", 3, Resp::Pending, future_deadline(), now_secs())
+        .unwrap();
+    assert!(matches!(wrong_account, ManagedSyncOutcome::Stale));
+
+    let pending = store
+        .apply_managed_sync("acct-1", 3, Resp::Pending, future_deadline(), now_secs())
+        .unwrap();
+    assert!(matches!(pending, ManagedSyncOutcome::Pending));
+    assert!(store.lease_until().is_none());
+    assert!(!store.is_session_authorized(&pk));
+}
+
+#[tokio::test]
+async fn managed_committed_revocation_is_durable_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_path = dir.path().join("authorized_keys");
+    let (_sk, pk) = gen_key();
+    {
+        let store = AuthorizedKeysStore::open_or_create(auth_path.clone()).unwrap();
+        managed_enroll(&store, pk, "acct-1", 3);
+        let outcome = store
+            .apply_managed_sync("acct-1", 3, Resp::Removed, future_deadline(), now_secs())
+            .unwrap();
+        match outcome {
+            ManagedSyncOutcome::Removed {
+                removed,
+                persist_failed,
+            } => {
+                assert_eq!(removed, vec![pk]);
+                assert!(!persist_failed);
+            }
+            _ => panic!("expected Removed"),
+        }
+        assert!(store.managed_binding().unwrap().revoked);
+        assert!(!store.is_session_authorized(&pk));
+    }
+    let reopened = AuthorizedKeysStore::open_or_create(auth_path).unwrap();
+    assert!(reopened.managed_binding().unwrap().revoked);
+    assert!(!reopened.is_authorized(&pk));
+    assert!(reopened.managed_sync_target().is_none());
+}
+
+#[tokio::test]
+async fn managed_revocation_write_failure_fails_closed_and_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_path = dir.path().join("authorized_keys");
+    let trust_path = dir.path().join("account_trust.json");
+    let (_sk, pk) = gen_key();
+    let store = AuthorizedKeysStore::open_or_create(auth_path.clone()).unwrap();
+    managed_enroll(&store, pk, "acct-1", 3);
+
+    // Replacing the trust file with a directory makes the atomic rename fail deterministically.
+    std::fs::remove_file(&trust_path).ok();
+    std::fs::create_dir(&trust_path).unwrap();
+
+    let outcome = store
+        .apply_managed_sync("acct-1", 3, Resp::Removed, future_deadline(), now_secs())
+        .unwrap();
+    let persist_failed = match outcome {
+        ManagedSyncOutcome::Removed { persist_failed, .. } => persist_failed,
+        _ => panic!("expected Removed"),
+    };
+    assert!(
+        persist_failed,
+        "write failure must be reported, not swallowed"
+    );
+    // Denial is in memory even though the write failed: revoked keys are not admitted.
+    assert!(store.has_pending_revocation_persist());
+    assert!(!store.is_session_authorized(&pk));
+    assert!(store.managed_binding().unwrap().revoked);
+
+    // Retry still fails while the path is blocked...
+    assert!(store.retry_persist_trust().is_err());
+    assert!(store.has_pending_revocation_persist());
+
+    // ...and succeeds once the path is clear.
+    std::fs::remove_dir(&trust_path).unwrap();
+    store.retry_persist_trust().unwrap();
+    assert!(!store.has_pending_revocation_persist());
+    drop(store);
+    let reopened = AuthorizedKeysStore::open_or_create(auth_path).unwrap();
+    assert!(reopened.managed_binding().unwrap().revoked);
+    assert!(!reopened.is_authorized(&pk));
+}
+
+#[tokio::test]
+async fn managed_newer_epoch_enrollment_keeps_only_the_new_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AuthorizedKeysStore::open_or_create(dir.path().join("authorized_keys")).unwrap();
+    let (_sk_old, old) = gen_key();
+    let (_sk_new, new) = gen_key();
+
+    assert!(managed_enroll(&store, old, "acct-1", 3));
+    // Make the old binding active so the old seed is admitted under it.
+    let snap = make_snapshot("acct-1", 1, false, vec![(old, "Old")], vec![], vec![]);
+    store
+        .apply_managed_sync(
+            "acct-1",
+            3,
+            Resp::Active { snapshot: snap },
+            future_deadline(),
+            now_secs(),
+        )
+        .unwrap();
+    assert!(store.is_session_authorized(&old));
+
+    // A newer epoch replaces the binding: close-old is signalled and only the new seed remains.
+    assert!(managed_enroll(&store, new, "acct-1", 4));
+    assert_eq!(store.managed_binding().unwrap().epoch, 4);
+    assert!(
+        !store.is_authorized(&old),
+        "old seed must not survive a newer epoch"
+    );
+    assert!(store.lease_until().is_none());
+    assert!(
+        !store.is_session_authorized(&new),
+        "new seed is not admitted until a snapshot"
+    );
+}
+
+#[tokio::test]
+async fn managed_linked_epoch0_migration_carries_roots_and_admits_only_snapshot_devices() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth_path = dir.path().join("authorized_keys");
+    let (_sk_root, root) = gen_key();
+    let (_sk_other, other) = gen_key();
+    let (_sk_new, new) = gen_key();
+    let now = now_secs();
+
+    let store = AuthorizedKeysStore::open_or_create(auth_path.clone()).unwrap();
+    store.add_key(root, "Root".into()).unwrap();
+    link_store(&store, &root, "acct-1", now);
+    store.add_key(other, "Other".into()).unwrap();
+    assert!(store.managed_binding().is_none());
+
+    // Existing linked epoch-0 migration: local roots are carried into the binding.
+    assert!(managed_enroll(&store, new, "acct-1", 0));
+    assert_eq!(store.managed_binding().unwrap().epoch, 0);
+    assert!(
+        !store.is_session_authorized(&root),
+        "carried roots are not admitted yet"
+    );
+    assert!(!store.is_session_authorized(&new));
+
+    // Only devices present in the verified active snapshot are admitted.
+    let snap = make_snapshot(
+        "acct-1",
+        2,
+        false,
+        vec![(root, "Root"), (new, "Phone")],
+        vec![],
+        vec![],
+    );
+    store
+        .apply_managed_sync(
+            "acct-1",
+            0,
+            Resp::Active { snapshot: snap },
+            future_deadline(),
+            now,
+        )
+        .unwrap();
+    assert!(store.is_session_authorized(&root));
+    assert!(store.is_session_authorized(&new));
+    assert!(
+        !store.is_session_authorized(&other),
+        "device absent from snapshot stays denied"
+    );
 }

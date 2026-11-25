@@ -297,6 +297,7 @@ pub fn build_notify_payload(
     host_node_id: &str,
     host_name: &str,
     alert: &AgentAlert,
+    host_epoch: u64,
 ) -> Result<serde_json::Value, String> {
     if (channel.caps & PUSH_CAP_E2E_CONTENT) != 0 {
         if channel.content_key.len() != 32 {
@@ -327,6 +328,7 @@ pub fn build_notify_payload(
         Ok(serde_json::json!({
             "channel_id": channel.channel_id,
             "host_node_id": host_node_id,
+            "host_epoch": host_epoch,
             "session_id": alert.session_id,
             "agent": alert.agent,
             "kind": kind_str,
@@ -338,6 +340,7 @@ pub fn build_notify_payload(
             "channel_id": channel.channel_id,
             "host_node_id": host_node_id,
             "host_name": host_name,
+            "host_epoch": host_epoch,
             "session_id": alert.session_id,
             "agent": alert.agent,
             "kind": alert.kind.legacy_str(),
@@ -350,6 +353,7 @@ pub fn build_activity_payload(
     host_node_id: &str,
     host_name: &str,
     ev: &ActivityUpdateEvent,
+    host_epoch: u64,
 ) -> Result<serde_json::Value, String> {
     let phase_str = ev.phase.as_str();
     let prompt_id_or_zero = ev.prompt_id.unwrap_or(0);
@@ -397,6 +401,7 @@ pub fn build_activity_payload(
     let mut body = serde_json::Map::new();
     body.insert("channel_id".into(), serde_json::json!(channel.channel_id));
     body.insert("host_node_id".into(), serde_json::json!(host_node_id));
+    body.insert("host_epoch".into(), serde_json::json!(host_epoch));
     body.insert("session_id".into(), serde_json::json!(ev.session_id));
     body.insert("event".into(), serde_json::json!(ev.event.as_str()));
     body.insert("ts".into(), serde_json::json!(ev.ts));
@@ -412,6 +417,7 @@ pub fn build_activity_payload(
             "start_attributes".into(),
             serde_json::json!({
                 "hostNodeId": host_node_id,
+                "hostEpoch": host_epoch,
                 "sessionId": ev.session_id,
                 "agent": ev.agent,
             }),
@@ -653,6 +659,7 @@ pub struct PushService {
     config_dir: PathBuf,
     auth: Arc<AuthorizedKeysStore>,
     host_node_id: [u8; 32],
+    host_secret: [u8; 32],
     channels: Mutex<HashMap<String, PushChannelV2>>,
     cloud: Option<Arc<CloudClient>>,
 }
@@ -671,18 +678,20 @@ impl PushService {
         config_dir: &Path,
         auth: Arc<AuthorizedKeysStore>,
         host_node_id: [u8; 32],
+        host_secret: [u8; 32],
     ) -> Arc<Self> {
         let cloud = CloudConfig::from_env()
             .ok()
             .and_then(|cfg| CloudClient::new(&cfg).ok())
             .map(Arc::new);
-        Self::open_with_cloud(config_dir, auth, host_node_id, cloud)
+        Self::open_with_cloud(config_dir, auth, host_node_id, host_secret, cloud)
     }
 
     pub fn open_with_cloud(
         config_dir: &Path,
         auth: Arc<AuthorizedKeysStore>,
         host_node_id: [u8; 32],
+        host_secret: [u8; 32],
         cloud: Option<Arc<CloudClient>>,
     ) -> Arc<Self> {
         let channels_path = config_dir.join("push-channels.json");
@@ -721,9 +730,26 @@ impl PushService {
             config_dir: config_dir.to_path_buf(),
             auth,
             host_node_id,
+            host_secret,
             channels: Mutex::new(initial_channels),
             cloud,
         })
+    }
+
+    /// Drops channels whose client is no longer authorized and persists the result. Called
+    /// immediately after a managed revocation so durable push bindings don't outlive the trust.
+    pub async fn prune_channels(&self) {
+        let PrunedChannels { snapshot, .. } = self.prune_and_snapshot_channels();
+        if let Some(snapshot) = snapshot {
+            let config_dir = self.config_dir.clone();
+            match tokio::task::spawn_blocking(move || save_channels_atomic(&config_dir, &snapshot))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("failed to save pruned push channels: {e}"),
+                Err(e) => tracing::warn!("prune push channels task failed: {e}"),
+            }
+        }
     }
 
     pub async fn set_channel(
@@ -823,7 +849,15 @@ impl PushService {
                 false
             }
         });
-        let deliverable = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let deliverable = map
+            .iter()
+            .filter(|(client_hex, _)| {
+                let mut key = [0u8; 32];
+                hex::decode_to_slice(client_hex, &mut key).is_ok()
+                    && self.auth.is_session_authorized(&key)
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         PrunedChannels {
             snapshot: pruned.then(|| map.clone()),
             deliverable,
@@ -873,6 +907,7 @@ impl PushService {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(alert) = rx.recv().await {
+                let host_epoch = this.auth.managed_epoch_or_zero();
                 let channels = this.deliverable_channels_v2_async().await;
                 if channels.is_empty() {
                     continue;
@@ -886,22 +921,44 @@ impl PushService {
                 let host_name = crate::net::dispatcher::host_display_name();
 
                 for (client_hex, channel) in channels {
-                    let payload =
-                        match build_notify_payload(&channel, &host_node_id, &host_name, &alert) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::warn!(error = %e, "failed to build push notify payload");
-                                continue;
-                            }
-                        };
+                    let payload = match build_notify_payload(
+                        &channel,
+                        &host_node_id,
+                        &host_name,
+                        &alert,
+                        host_epoch,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to build push notify payload");
+                            continue;
+                        }
+                    };
                     let cloud = Arc::clone(cloud);
                     let this_sub = Arc::clone(&this);
                     let channel_for_remove = channel.clone();
                     let secret = channel.secret;
 
                     tokio::spawn(async move {
+                        if !this_sub.auth.epoch_still_current(host_epoch) {
+                            tracing::debug!("push notify dropped: host epoch changed");
+                            return;
+                        }
+                        let body = match serde_json::to_vec(&payload) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to serialize push notify payload");
+                                return;
+                            }
+                        };
                         match cloud
-                            .post_json("/api/v1/push/notify", &payload, Some(&secret))
+                            .post_signed_with_bearer(
+                                "/api/v1/push/notify",
+                                body,
+                                &this_sub.host_secret,
+                                &this_sub.host_node_id,
+                                Some(&secret),
+                            )
                             .await
                         {
                             Ok(resp) => {
@@ -945,6 +1002,7 @@ impl PushService {
             client_hex: String,
             channel: PushChannelV2,
             event: ActivityUpdateEvent,
+            host_epoch: u64,
         }
         struct WorkerHandle {
             tx: tokio::sync::mpsc::Sender<ActivityJob>,
@@ -973,6 +1031,7 @@ impl PushService {
                         &host_node_id_w,
                         &host_name_w,
                         &job.event,
+                        job.host_epoch,
                     ) {
                         Ok(b) => b,
                         Err(e) => {
@@ -980,8 +1039,25 @@ impl PushService {
                             continue;
                         }
                     };
+                    if !this_w.auth.epoch_still_current(job.host_epoch) {
+                        tracing::debug!("activity update dropped: host epoch changed");
+                        continue;
+                    }
+                    let body_bytes = match serde_json::to_vec(&body) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to serialize activity payload");
+                            continue;
+                        }
+                    };
                     match cloud
-                        .post_json("/api/v1/push/activity", &body, Some(&job.channel.secret))
+                        .post_signed_with_bearer(
+                            "/api/v1/push/activity",
+                            body_bytes,
+                            &this_w.host_secret,
+                            &this_w.host_node_id,
+                            Some(&job.channel.secret),
+                        )
                         .await
                     {
                         Ok(resp) => {
@@ -1036,6 +1112,7 @@ impl PushService {
         tokio::spawn(async move {
             let mut workers: HashMap<(String, String), WorkerHandle> = HashMap::new();
             while let Some(ev) = rx.recv().await {
+                let host_epoch = this.auth.managed_epoch_or_zero();
                 let channels = this.deliverable_channels_v2_async().await;
                 let active_channel_ids: HashSet<&str> = channels
                     .iter()
@@ -1080,6 +1157,7 @@ impl PushService {
                         client_hex,
                         channel,
                         event: ev_send,
+                        host_epoch,
                     };
                     match worker.tx.try_send(job) {
                         Ok(()) => {
@@ -1334,7 +1412,7 @@ mod tests {
         let auth = Arc::new(AuthorizedKeysStore::open_or_create(auth_path).unwrap());
         let host_node_id = [0x42u8; 32];
 
-        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
 
         let client = [0x01u8; 32];
         let secret = "0123456789abcdef".repeat(4); // gitleaks:allow
@@ -1349,7 +1427,7 @@ mod tests {
             .expect("set channel should succeed");
 
         // Reload from disk
-        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
         let client_hex = hex::encode(client);
         assert_eq!(
             reloaded.channels.lock().get(&client_hex),
@@ -1369,7 +1447,7 @@ mod tests {
         let auth = Arc::new(AuthorizedKeysStore::open_or_create(auth_path).unwrap());
         let host_node_id = [0x42u8; 32];
 
-        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
 
         let client = [0x02u8; 32];
         let secret = "abcdef0123456789".repeat(4); // gitleaks:allow
@@ -1394,7 +1472,7 @@ mod tests {
         assert!(!service.channels.lock().contains_key(&client_hex));
 
         // Reload and verify disk also does not contain it
-        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
         assert!(!reloaded.channels.lock().contains_key(&client_hex));
     }
 
@@ -1411,7 +1489,7 @@ mod tests {
         auth.add_key(client_authorized, "Authorized Device".into())
             .unwrap();
 
-        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
 
         let secret = "0123456789abcdef".repeat(4); // gitleaks:allow
         let chan1 = PushChannel {
@@ -1443,7 +1521,7 @@ mod tests {
         assert_eq!(service.channels.lock().len(), 1);
 
         // Reload and check disk
-        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
         assert_eq!(reloaded.channels.lock().len(), 1);
         assert!(reloaded
             .channels
@@ -1456,7 +1534,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let auth_path = tmp.path().join("authorized_keys");
         let auth = Arc::new(AuthorizedKeysStore::open_or_create(auth_path).unwrap());
-        let service = PushService::open(tmp.path(), auth, [0x55u8; 32]);
+        let service = PushService::open(tmp.path(), auth, [0x55u8; 32], [0x55u8; 32]);
         let client = [0x99u8; 32];
 
         let valid_secret = "0123456789abcdef".repeat(4); // gitleaks:allow
@@ -1558,7 +1636,7 @@ mod tests {
         )
         .unwrap();
 
-        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let service = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
         auth.add_key(client, "Phone".into()).unwrap();
         let loaded = service.deliverable_channels_v2();
         assert_eq!(loaded.len(), 1);
@@ -1607,7 +1685,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id);
+        let reloaded = PushService::open(tmp.path(), Arc::clone(&auth), host_node_id, [0x77u8; 32]);
         let v2 = reloaded.deliverable_channels_v2();
         assert_eq!(v2[0].1.content_key, key);
         assert_eq!(
@@ -1695,7 +1773,7 @@ mod tests {
                 duration_secs: Some(12),
             },
         };
-        let payload = build_notify_payload(&ch_v2, "nodeabc", "SecretHost", &alert).unwrap();
+        let payload = build_notify_payload(&ch_v2, "nodeabc", "SecretHost", &alert, 0).unwrap();
         assert!(payload.get("host_name").is_none());
         assert_eq!(payload["kind"], "needs_input");
         assert_eq!(payload["prompt_id"], 99);
@@ -1732,7 +1810,7 @@ mod tests {
             content_key: Vec::new(),
             caps: 0,
         };
-        let v1_payload = build_notify_payload(&ch_v1, "nodeabc", "SecretHost", &alert).unwrap();
+        let v1_payload = build_notify_payload(&ch_v1, "nodeabc", "SecretHost", &alert, 0).unwrap();
         assert_eq!(v1_payload["host_name"], "SecretHost");
         assert_eq!(v1_payload["kind"], "needs_approval");
         assert!(v1_payload.get("enc").is_none());
@@ -1765,7 +1843,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let body = build_activity_payload(&ch_pts, "node1", "Mac", &ev_update).unwrap();
+        let body = build_activity_payload(&ch_pts, "node1", "Mac", &ev_update, 0).unwrap();
         assert_eq!(body["event"], "update");
         assert_eq!(body["ts"], 1764000010);
         assert_eq!(body["start_attributes"]["hostNodeId"], "node1");
@@ -1801,7 +1879,7 @@ mod tests {
             prompt_id: Some(55),
             ..ev_update.clone()
         };
-        let end_body = build_activity_payload(&ch_pts, "node1", "Mac", &ev_end).unwrap();
+        let end_body = build_activity_payload(&ch_pts, "node1", "Mac", &ev_end, 0).unwrap();
         assert!(end_body.get("start_attributes").is_none());
         assert_eq!(end_body["content_state"]["promptId"], 55);
 
@@ -1810,7 +1888,8 @@ mod tests {
             caps: PUSH_CAP_E2E_CONTENT | PUSH_CAP_LIVE_ACTIVITY,
             ..ch_pts
         };
-        let no_pts_body = build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_update).unwrap();
+        let no_pts_body =
+            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_update, 0).unwrap();
         assert!(no_pts_body.get("start_attributes").is_none());
 
         // dismiss_immediately is emitted only when true and event == End
@@ -1822,7 +1901,7 @@ mod tests {
             ..ev_end
         };
         let end_imm_body =
-            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_end_immediate).unwrap();
+            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_end_immediate, 0).unwrap();
         assert_eq!(end_imm_body["dismiss_immediately"], true);
 
         let ev_update_immediate = ActivityUpdateEvent {
@@ -1830,7 +1909,7 @@ mod tests {
             ..ev_update
         };
         let upd_imm_body =
-            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_update_immediate).unwrap();
+            build_activity_payload(&ch_no_pts, "node1", "Mac", &ev_update_immediate, 0).unwrap();
         assert!(upd_imm_body.get("dismiss_immediately").is_none());
     }
 
@@ -1895,8 +1974,13 @@ mod tests {
         let client = [0x55u8; 32];
         auth.add_key(client, "iPhone".into()).unwrap();
         let cloud = Arc::new(CloudClient::new_insecure_for_test(format!("http://{addr}")));
-        let service =
-            PushService::open_with_cloud(tmp.path(), Arc::clone(&auth), [0x11u8; 32], Some(cloud));
+        let service = PushService::open_with_cloud(
+            tmp.path(),
+            Arc::clone(&auth),
+            [0x11u8; 32],
+            [0x11u8; 32],
+            Some(cloud),
+        );
         service
             .set_channel_v2(
                 client,
@@ -2041,7 +2125,7 @@ mod tests {
             attention_id: 1,
             detail: AlertDetail::default(),
         };
-        assert!(build_notify_payload(&bad_ch, "node1", "Mac", &alert).is_err());
+        assert!(build_notify_payload(&bad_ch, "node1", "Mac", &alert, 0).is_err());
 
         let ev = ActivityUpdateEvent {
             session_id: "s1".into(),
@@ -2055,7 +2139,7 @@ mod tests {
             dismiss_immediately: false,
             detail: AlertDetail::default(),
         };
-        assert!(build_activity_payload(&bad_ch, "node1", "Mac", &ev).is_err());
+        assert!(build_activity_payload(&bad_ch, "node1", "Mac", &ev, 0).is_err());
 
         let tmp = tempfile::tempdir().unwrap();
         let auth_path = tmp.path().join("authorized_keys");
@@ -2077,7 +2161,8 @@ mod tests {
             serde_json::to_vec(&corrupt_json).unwrap(),
         )
         .unwrap();
-        let reloaded = PushService::open_with_cloud(tmp.path(), auth, [0x11u8; 32], None);
+        let reloaded =
+            PushService::open_with_cloud(tmp.path(), auth, [0x11u8; 32], [0x11u8; 32], None);
         assert!(reloaded.deliverable_channels_v2().is_empty());
     }
 }

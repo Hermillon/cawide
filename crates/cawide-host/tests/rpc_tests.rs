@@ -7,9 +7,9 @@ use cawide_protocol::types::{
     GitOp, GitPatchAction, GitPatchRequest, GitPatchSource, GitReply,
 };
 use cawide_protocol::{
-    read_control_message, write_control_message, ControlMessage, HostEvent, RpcRequest,
-    RpcResponse, StreamPurpose, FS_READ_CHUNK_MAX_BYTES, FS_UPLOAD_MAX_BYTES,
-    MAX_CHUNKED_FILE_SIZE, MAX_DIFF_BYTES, MAX_FILE_SIZE,
+    read_control_message, read_rpc_response, write_control_message, write_rpc_request,
+    ControlMessage, HostEvent, RpcRequest, RpcResponse, StreamPurpose, FS_READ_CHUNK_MAX_BYTES,
+    FS_UPLOAD_MAX_BYTES, MAX_CHUNKED_FILE_SIZE, MAX_DIFF_BYTES, MAX_FILE_SIZE,
 };
 use common::{open, within, Env};
 #[cfg(unix)]
@@ -1558,4 +1558,72 @@ async fn ipc_account_status_devices_with_source_and_unlink() {
 
     ep2.close().await;
     env.shutdown().await;
+}
+
+/// Adopting a locally paired device hands it a verifiable host proof on the RPC stream,
+/// then closes the connection with `CLOSE_UNAUTHORIZED`. The proof is received first.
+#[tokio::test(flavor = "multi_thread")]
+async fn account_adopt_proof_is_received_before_connection_close() {
+    let mut env = Env::start().await;
+    let adopter_pk = *env._ep.id().as_bytes();
+    // The harness already paired this client key, so it is a valid adoption seed as-is.
+    assert!(env.server.auth_store().is_session_authorized(&adopter_pk));
+
+    let nonce = [0x3cu8; 32];
+    within(write_rpc_request(
+        &mut env.send,
+        1,
+        &RpcRequest::AccountAdopt {
+            account_id: "acct-1".into(),
+            epoch: 0,
+            nonce,
+        },
+    ))
+    .await
+    .unwrap();
+
+    let frame = within(read_rpc_response(&mut env.recv))
+        .await
+        .unwrap()
+        .expect("adopt response must arrive before the connection closes");
+    let RpcResponse::AccountAdopt(Ok(bytes)) = frame.payload else {
+        panic!("expected AccountAdopt Ok, got {:?}", frame.payload);
+    };
+    let proof = cawide_account::ManagedHostProof::from_bytes(&bytes).unwrap();
+    proof.verify().unwrap();
+    assert_eq!(proof.body.host, env.server.node_id());
+    assert_eq!(proof.body.account_id, "acct-1");
+    assert_eq!(proof.body.claimer, adopter_pk);
+    assert_eq!(proof.body.nonce, nonce);
+    assert!(!proof.body.fresh_pair);
+
+    // Only after the proof is delivered does the host end the transport.
+    match within(env.conn.closed()).await {
+        iroh::endpoint::ConnectionError::ApplicationClosed(c) => {
+            assert_eq!(
+                c.error_code,
+                iroh::endpoint::VarInt::from_u32(cawide_protocol::CLOSE_UNAUTHORIZED)
+            );
+        }
+        other => panic!("expected ApplicationClosed(CLOSE_UNAUTHORIZED), got {other:?}"),
+    }
+}
+
+/// Once a host is managed, the legacy linked-claim is refused. The guard lives in
+/// `begin_claim`, which `AccountClaimer::claim` (the `AccountClaim` RPC) calls.
+#[test]
+fn legacy_account_claim_rejected_once_managed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        cawide_host::AuthorizedKeysStore::open_or_create(dir.path().join("authorized_keys"))
+            .unwrap();
+    let client = cawide_account::public_key_of(&[0x61u8; 32]);
+    store
+        .begin_managed_pair(client, "Phone".into(), "acct-1", 0, 0)
+        .unwrap();
+
+    let err = store
+        .begin_claim(&client, "acct-2", true, 0)
+        .expect_err("legacy claim must be refused on a managed host");
+    assert_eq!(err, "Update Cawide and pair from your account");
 }

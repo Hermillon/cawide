@@ -19,6 +19,9 @@ pub const CONTEXT_REMOVE: &[u8] = b"cawide/device-remove/1\0";
 pub const CONTEXT_HOST_REQUEST: &[u8] = b"cawide/host-request/1\0";
 pub const CONTEXT_COMMIT: &[u8] = b"cawide/approval-commit/1\0";
 pub const CONTEXT_SAS: &[u8] = b"cawide/approval-sas/1\0";
+pub const CONTEXT_MANAGED_CLAIM: &[u8] = b"cawide/managed-claim/1\0";
+pub const CONTEXT_MANAGED_CLAIM_ACCEPT: &[u8] = b"cawide/managed-claim-accept/1\0";
+pub const CONTEXT_SESSION_REGISTER: &[u8] = b"cawide/device-session-register/1\0";
 
 pub const MAX_ACCOUNT_ID_LEN: usize = 64;
 pub const MAX_NAME_LEN: usize = 64;
@@ -30,6 +33,8 @@ pub const MAX_SNAPSHOT_REVOKED: usize = 1024;
 
 pub const HOST_SYNC_PATH: &str = "/api/v1/host/sync";
 pub const HOST_UNLINK_PATH: &str = "/api/v1/host/unlink";
+pub const MANAGED_HOST_SYNC_PATH: &str = "/api/v1/host/sync-managed";
+pub const MANAGED_HOST_UNLINK_PATH: &str = "/api/v1/host/unlink-managed";
 pub const HEADER_HOST: &str = "x-cawide-host";
 pub const HEADER_TIMESTAMP: &str = "x-cawide-timestamp";
 pub const HEADER_SIGNATURE: &str = "x-cawide-signature";
@@ -150,6 +155,35 @@ macro_rules! statement_bytes {
             }
         }
     )*};
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeviceSessionRegistration {
+    pub account_id: String,
+    pub public_key: PublicKey,
+    pub name: String,
+    pub platform: String,
+    pub issued_at: u64,
+    pub session_id: String,
+}
+
+impl DeviceSessionRegistration {
+    pub fn signing_message(&self) -> Vec<u8> {
+        context_message(CONTEXT_SESSION_REGISTER, self)
+    }
+
+    pub fn validate(&self) -> Result<(), AccountError> {
+        validate_account_id(&self.account_id)?;
+        validate_name(&self.name)?;
+        validate_platform(&self.platform)?;
+        if self.session_id.trim().is_empty()
+            || self.session_id.len() > 128
+            || self.session_id.chars().any(char::is_control)
+        {
+            return Err(AccountError::Invalid("session id"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -332,8 +366,77 @@ impl DeviceRemoval {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedClaimBody {
+    pub account_id: String,
+    pub host: PublicKey,
+    pub claimer: PublicKey,
+    pub epoch: u64,
+    pub nonce: [u8; 32],
+    pub fresh_pair: bool,
+}
+
+impl ManagedClaimBody {
+    pub fn host_signing_message(&self) -> Vec<u8> {
+        context_message(CONTEXT_MANAGED_CLAIM, self)
+    }
+
+    pub fn claimer_signing_message(&self) -> Vec<u8> {
+        context_message(CONTEXT_MANAGED_CLAIM_ACCEPT, self)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedHostProof {
+    pub body: ManagedClaimBody,
+    pub host_sig: Vec<u8>,
+}
+
+impl ManagedHostProof {
+    pub fn verify(&self) -> Result<(), AccountError> {
+        validate_account_id(&self.body.account_id)?;
+        verify(
+            &self.body.host,
+            &self.body.host_signing_message(),
+            &self.host_sig,
+        )?;
+        if self.body.host == self.body.claimer {
+            return Err(AccountError::Invalid("claim"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedClaim {
+    pub body: ManagedClaimBody,
+    pub host_sig: Vec<u8>,
+    pub claimer_sig: Vec<u8>,
+}
+
+impl ManagedClaim {
+    pub fn verify(&self) -> Result<(), AccountError> {
+        validate_account_id(&self.body.account_id)?;
+        verify(
+            &self.body.host,
+            &self.body.host_signing_message(),
+            &self.host_sig,
+        )?;
+        verify(
+            &self.body.claimer,
+            &self.body.claimer_signing_message(),
+            &self.claimer_sig,
+        )?;
+        if self.body.host == self.body.claimer {
+            return Err(AccountError::Invalid("claim"));
+        }
+        Ok(())
+    }
+}
+
 statement_bytes!(
     DeviceRegistration,
+    DeviceSessionRegistration,
     DeviceLinkBody,
     DeviceLink,
     MachineClaimBody,
@@ -341,6 +444,9 @@ statement_bytes!(
     HostClaimProof,
     DeviceRevocation,
     DeviceRemoval,
+    ManagedClaimBody,
+    ManagedHostProof,
+    ManagedClaim,
 );
 
 /// `CONTEXT_HOST_REQUEST ‖ method ‖ "\n" ‖ path ‖ "\n" ‖ timestamp ‖ "\n" ‖ sha256(body)`.
@@ -441,6 +547,28 @@ pub struct SnapshotDevice {
 pub struct SnapshotRevocation {
     pub public_key: String,
     pub revoked_at: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedHostSyncRequest {
+    pub account_id: String,
+    pub epoch: u64,
+    pub sync: HostSyncRequest,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ManagedHostSyncResponse {
+    Active { snapshot: HostTrustSnapshot },
+    Pending,
+    Removed,
+}
+
+/// Body of `MANAGED_HOST_UNLINK_PATH`. Epoch-gated: a stale epoch cannot remove a newer owner.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedHostUnlinkRequest {
+    pub account_id: String,
+    pub epoch: u64,
 }
 
 #[cfg(test)]

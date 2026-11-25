@@ -268,6 +268,15 @@ impl CawideServer {
             Arc::clone(&claimed),
         ));
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let push = crate::push::PushService::open(
+            &config.config_dir,
+            Arc::clone(&auth_store),
+            node_id,
+            host_secret,
+        );
+        push.spawn_dispatcher(alert_rx);
+        push.spawn_activity_dispatcher(activity_rx);
+        let trust_wake = Arc::new(tokio::sync::Notify::new());
         let (trust, trust_task) = if config.network_mode == NetworkMode::N0 {
             let cfg = CloudConfig::from_env().map_err(|e| NetError::Bind(e.to_string()))?;
             let client = CloudClient::new(&cfg).map_err(|e| NetError::Bind(e.to_string()))?;
@@ -275,22 +284,32 @@ impl CawideServer {
                 client,
                 Arc::clone(&auth_store),
                 Arc::clone(&connections),
-                endpoint.clone(),
+                Arc::clone(&push),
+                {
+                    let endpoint = endpoint.clone();
+                    Arc::new(move || {
+                        let addr = endpoint.addr();
+                        let relay_url = addr.relay_urls().next().map(|u| u.to_string());
+                        let direct_addrs =
+                            crate::net::ipc::filter_direct_addrs(addr.ip_addrs().copied())
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect();
+                        (relay_url, direct_addrs)
+                    })
+                },
                 host_secret,
                 node_id,
                 Arc::clone(&trust_kick),
                 Arc::clone(&relinked),
                 Arc::clone(&claimed),
+                Arc::clone(&trust_wake),
             );
             let task = Arc::clone(&sync).spawn(shutdown_tx.subscribe());
             (Some(sync), Some(task))
         } else {
             (None, None)
         };
-        let push =
-            crate::push::PushService::open(&config.config_dir, Arc::clone(&auth_store), node_id);
-        push.spawn_dispatcher(alert_rx);
-        push.spawn_activity_dispatcher(activity_rx);
         let git_host_env = Arc::new(crate::rpc::git::env::GitHostEnv::new(config.git_env));
         let forge_service = Arc::new(crate::forge::ForgeService::new(
             config.config_dir.clone(),
@@ -306,8 +325,12 @@ impl CawideServer {
                     connections: Arc::clone(&connections),
                     forge_service,
                     git_host_env,
-                    push,
+                    push: Arc::clone(&push),
                     account,
+                    auth_store: Arc::clone(&auth_store),
+                    host_secret,
+                    node_id,
+                    trust_wake: Arc::clone(&trust_wake),
                 },
             )
             .accept(
@@ -316,6 +339,10 @@ impl CawideServer {
                     pairing_manager: Arc::clone(&pairing_manager),
                     auth_store: Arc::clone(&auth_store),
                     host_name: Arc::from(host_display_name()),
+                    host_secret,
+                    node_id,
+                    trust_wake: Arc::clone(&trust_wake),
+                    connections: Arc::clone(&connections),
                 },
             );
         for legacy_alpn in ALPN_CAWIDE_LEGACY {
@@ -332,6 +359,7 @@ impl CawideServer {
             broadcaster: Arc::clone(&broadcaster),
             connections: Arc::clone(&connections),
             trust,
+            push: Arc::clone(&push),
             shutdown_tx: shutdown_tx.clone(),
         });
         let ipc_task = tokio::spawn(serve_ipc(listener, ctx, shutdown_rx));

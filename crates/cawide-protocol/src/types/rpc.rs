@@ -108,6 +108,12 @@ pub enum RpcRequest {
         prompt: String,
         choice: AgentChoice,
     },
+    /// Adopt this unmanaged host into a Cawide account; the host signs a managed claim proof.
+    AccountAdopt {
+        account_id: String,
+        epoch: u64,
+        nonce: [u8; 32],
+    },
 }
 
 /// Remote procedure call responses returned on stream 0x03.
@@ -140,6 +146,8 @@ pub enum RpcResponse {
     AccountClaim(Result<Vec<u8>, String>),
     SetPushChannelV2(Result<(), String>),
     AgentRespond(Result<(), String>),
+    /// `postcard(cawide_account::ManagedHostProof)` on success.
+    AccountAdopt(Result<Vec<u8>, String>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

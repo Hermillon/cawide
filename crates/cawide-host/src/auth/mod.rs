@@ -6,4 +6,5 @@ pub use error::AuthError;
 pub use pairing::{PairingManager, PairingTicket};
 pub use store::{
     validate_device_name, AccountLink, AuthorizedEntry, AuthorizedKeysStore, KeySource,
+    ManagedSyncOutcome, LEASE_SECS,
 };
