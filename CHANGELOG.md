@@ -6,12 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [0.16.0] - 2026-11-26
 
 ### Added
 - First-class Claude Code integration: loop-proof POSIX `claude` launcher shim (`CAWIDE_CLAUDE_SHIM_PID` / `CAWIDE_CLAUDE_OWNER`) injecting per-launch `--settings <config_dir>/agents/claude-settings.json` with all 15 hook events, plus `ClaudeEvent` and long-lived `ClaudePermission` IPC (`run_claude_hook`, `ClaudeSessionState`).
 - Interactive remote responses for Claude Code `PermissionRequest` (`Bash`/tool approvals, `AskUserQuestion`, and `ExitPlanMode` plan review/feedback), backed by a `transcript_path` watcher and PTY-input anchor accelerator.
 - `remove_legacy_claude_hooks` cleanup for legacy `" hook claude --event "` entries in `~/.claude/settings.json` without creating `.cawide-bak` backups.
+- `cawide agent <codex|opencode>` launcher and native Codex/OpenCode observers with phone replies.
+
+### Removed
+- codex/opencode hooks, OpenCode plugin, codex/opencode shims, `cawide setup codex|opencode`.
+
+### Fixed
+- daemons with a non-default config dir (tests) no longer modify `$HOME`; legacy codex/opencode entries are cleaned on daemon start.
 
 ### Notes
 - On Windows, `pwsh`/`cmd` PTYs resolve `claude.cmd` via `PATHEXT` rather than the POSIX `sh` shim, so Claude Code state comes from process probing only.

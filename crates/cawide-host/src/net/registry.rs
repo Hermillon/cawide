@@ -70,6 +70,8 @@ pub struct SessionEntry {
     pub claude_state: crate::agent::claude::ClaudeSessionState,
     pub pending_permissions: HashMap<String, PendingPermission>,
     pub last_anchor_check_ms: u64,
+    pub fg_agent: Option<&'static str>,
+    pub agent_argv: Vec<String>,
 }
 pub struct SessionRegistry {
     sessions: parking_lot::RwLock<HashMap<String, SessionEntry>>,
@@ -84,6 +86,7 @@ pub struct SessionRegistry {
     config_dir: Option<PathBuf>,
     alerts: Option<tokio::sync::mpsc::Sender<crate::push::AgentAlert>>,
     activities: Option<tokio::sync::mpsc::Sender<crate::push::ActivityUpdateEvent>>,
+    observer_tx: Option<tokio::sync::mpsc::Sender<crate::agent::observe::ObserverCommand>>,
 }
 
 pub struct RespondSnapshot {
@@ -274,6 +277,7 @@ impl SessionRegistry {
             config_dir: crate::net::config_dir().ok(),
             alerts: None,
             activities: None,
+            observer_tx: None,
         }
     }
 
@@ -310,6 +314,14 @@ impl SessionRegistry {
         tx: tokio::sync::mpsc::Sender<crate::push::ActivityUpdateEvent>,
     ) -> Self {
         self.activities = Some(tx);
+        self
+    }
+
+    pub fn with_observer_sender(
+        mut self,
+        tx: tokio::sync::mpsc::Sender<crate::agent::observe::ObserverCommand>,
+    ) -> Self {
+        self.observer_tx = Some(tx);
         self
     }
 
@@ -515,6 +527,8 @@ impl SessionRegistry {
                 claude_state: crate::agent::claude::ClaudeSessionState::default(),
                 pending_permissions: HashMap::new(),
                 last_anchor_check_ms: 0,
+                fg_agent: None,
+                agent_argv: Vec::new(),
             },
         );
         drop(sessions);
@@ -590,6 +604,8 @@ impl SessionRegistry {
             claude_state: crate::agent::claude::ClaudeSessionState::default(),
             pending_permissions: HashMap::new(),
             last_anchor_check_ms: 0,
+            fg_agent: None,
+            agent_argv: Vec::new(),
         };
         let sum = summary(session_id, &entry);
         sessions.insert(session_id.to_string(), entry);
@@ -832,6 +848,7 @@ impl SessionRegistry {
             id: String,
             session: Arc<PtySession>,
             fg: Option<Foreground>,
+            argv: Vec<String>,
             cwd: Option<PathBuf>,
             git_root: Option<PathBuf>,
             signals: TerminalSignals,
@@ -849,6 +866,10 @@ impl SessionRegistry {
             let pgid = session.foreground_pgid();
             let info = pgid.and_then(|p| proc_info(p, scratch));
             let fg = info.as_ref().map(classify);
+            let argv = match (&fg, info) {
+                (Some(Foreground::Agent(_)), Some(i)) => i.argv,
+                _ => Vec::new(),
+            };
             let cwd = if matches!(fg, Some(Foreground::Shell | Foreground::Agent(_))) {
                 pgid.and_then(proc_cwd)
             } else {
@@ -861,6 +882,7 @@ impl SessionRegistry {
                 id,
                 session,
                 fg,
+                argv,
                 cwd,
                 git_root,
                 signals,
@@ -882,6 +904,19 @@ impl SessionRegistry {
                         entry.git_root = obs.git_root;
                     }
                     entry.title = obs.signals.title.clone();
+                    match obs.fg {
+                        Some(Foreground::Agent(slug)) => {
+                            entry.fg_agent = Some(slug);
+                            if entry.agent_argv != obs.argv {
+                                entry.agent_argv = obs.argv;
+                            }
+                        }
+                        Some(Foreground::Shell) | None => {
+                            entry.fg_agent = None;
+                            entry.agent_argv.clear();
+                        }
+                        Some(Foreground::Other) => {}
+                    }
                     let ts = now_secs();
                     let res =
                         entry
@@ -931,6 +966,75 @@ impl SessionRegistry {
         }
     }
 
+    pub fn observer_candidates(&self, agent: &str) -> Vec<crate::agent::observe::Candidate> {
+        let sessions = self.sessions.read();
+        sessions
+            .iter()
+            .filter(|(_, e)| e.session.is_alive() && e.fg_agent == Some(agent))
+            .map(|(id, e)| crate::agent::observe::Candidate {
+                session_id: id.clone(),
+                argv: e.agent_argv.clone(),
+            })
+            .collect()
+    }
+
+    pub async fn observer_respond(
+        &self,
+        key: &str,
+        choice: cawide_protocol::types::AgentChoice,
+    ) -> Result<(), String> {
+        let Some(tx) = self.observer_tx.clone() else {
+            return Err("agent connection unavailable".into());
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = crate::agent::observe::ObserverCommand::Respond {
+            key: key.to_string(),
+            choice,
+            reply: reply_tx,
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(10), async move {
+            tx.send(cmd)
+                .await
+                .map_err(|_| "agent connection unavailable".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "agent connection unavailable".to_string())?
+        })
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Err("agent connection unavailable".into()),
+        }
+    }
+
+    pub async fn observer_prepare(
+        &self,
+        agent: &'static str,
+        cwd: PathBuf,
+    ) -> Result<String, String> {
+        let Some(tx) = self.observer_tx.clone() else {
+            return Err("agent server unavailable".into());
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let cmd = crate::agent::observe::ObserverCommand::Prepare {
+            agent,
+            cwd,
+            reply: reply_tx,
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(20), async move {
+            tx.send(cmd)
+                .await
+                .map_err(|_| "agent server unavailable".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "agent server unavailable".to_string())?
+        })
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Err("agent server unavailable".into()),
+        }
+    }
     pub fn touch(&self, session_id: &str) {
         if let Some(entry) = self.sessions.read().get(session_id) {
             entry.last_active_ts.store(now_secs(), Ordering::Relaxed);
@@ -1738,6 +1842,8 @@ mod tests {
             claude_state: crate::agent::claude::ClaudeSessionState::default(),
             pending_permissions: HashMap::new(),
             last_anchor_check_ms: 0,
+            fg_agent: None,
+            agent_argv: Vec::new(),
         };
         assert_eq!(tab_title("sess-1", &entry).as_deref(), Some("Custom Tab"));
 

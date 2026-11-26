@@ -103,37 +103,7 @@ fn test_setup_claude_idempotent_and_preserves_keys() {
 }
 
 #[test]
-fn test_setup_codex_foreign_notify_kept() {
-    let tmp = tempfile::tempdir().unwrap();
-    let home = tmp.path();
-    let codex_dir = home.join(".codex");
-    std::fs::create_dir_all(&codex_dir).unwrap();
-    let config_file = codex_dir.join("config.toml");
-    std::fs::write(&config_file, "notify = [\"custom\", \"script\"]\n").unwrap();
-
-    let exe = PathBuf::from("/usr/local/bin/cawide");
-    let summary = run_setup(home, &exe, "codex", false).unwrap();
-    assert!(
-        summary.ends_with("Codex ignores new or changed hooks until you approve them: run /hooks inside Codex once."),
-        "summary must end with approval instruction: {summary}"
-    );
-
-    let config_content = std::fs::read_to_string(&config_file).unwrap();
-    assert!(
-        config_content.contains("custom"),
-        "foreign notify must be kept"
-    );
-    assert!(
-        config_content.contains("features.hooks = true") || config_content.contains("hooks = true"),
-        "features.hooks must be enabled"
-    );
-
-    let hooks_file = codex_dir.join("hooks.json");
-    assert!(hooks_file.exists());
-}
-
-#[test]
-fn test_setup_omp_refuses_non_marker_and_opencode() {
+fn test_setup_omp_refuses_non_marker() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path();
     let omp_ext_dir = home.join(".omp/agent/extensions");
@@ -181,68 +151,36 @@ fn test_setup_omp_refuses_non_marker_and_opencode() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    // OpenCode setup
-    let opencode_summary = run_setup(home, &exe, "opencode", false).unwrap();
-    assert!(!opencode_summary.is_empty());
-    let opencode_file = home.join(".config/opencode/plugins/cawide.js");
-    assert!(opencode_file.exists());
-    let opencode_content = std::fs::read_to_string(&opencode_file).unwrap();
-    assert!(opencode_content.starts_with("// cawide-telemetry v3"));
-    assert!(opencode_content.contains("CAWIDE_SESSION_ID"));
-    assert!(opencode_content.contains("CAWIDE_SOCKET"));
-    if let Ok(mut child) = Command::new("node")
-        .args(["--input-type=module", "--check"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(opencode_content.as_bytes());
-        }
-        let out = child.wait_with_output().unwrap();
+}
+
+#[test]
+fn test_setup_codex_and_opencode_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let exe = PathBuf::from("/usr/local/bin/cawide");
+    for agent in ["codex", "opencode"] {
+        let err = run_setup(home, &exe, agent, false).unwrap_err();
         assert!(
-            out.status.success(),
-            "generated opencode plugin JS must parse cleanly: {}",
-            String::from_utf8_lossy(&out.stderr)
+            err.to_string().contains("needs no setup"),
+            "expected no-setup error for {agent}, got: {err}"
         );
+        let err_rm = run_setup(home, &exe, agent, true).unwrap_err();
+        assert!(err_rm.to_string().contains("needs no setup"));
     }
 }
 
 #[test]
 fn test_cli_hook_no_env() {
-    let codex_out = Command::new(env!("CARGO_BIN_EXE_cawide"))
-        .arg("hook")
-        .arg("codex")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(codex_out.status.success());
-    assert_eq!(String::from_utf8_lossy(&codex_out.stdout), "{}");
-
-    let claude_out = Command::new(env!("CARGO_BIN_EXE_cawide"))
-        .arg("hook")
-        .arg("claude")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(claude_out.status.success());
-    assert!(claude_out.stdout.is_empty());
-}
-
-#[test]
-fn test_cli_hook_codex_stop_prints_json() {
-    let output = Command::new(env!("CARGO_BIN_EXE_cawide"))
-        .arg("hook")
-        .arg("codex")
-        .arg("--event")
-        .arg("Stop")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "{}");
+    for agent in ["omp", "claude", "codex"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_cawide"))
+            .arg("hook")
+            .arg(agent)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty(), "{agent} stdout should be empty");
+    }
 }
 
 #[test]
@@ -250,7 +188,7 @@ fn test_cli_hook_hanging_stdin_timeout() {
     let start = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_cawide"))
         .arg("hook")
-        .arg("codex")
+        .arg("omp")
         .env("CAWIDE_SESSION_ID", "test-sess")
         .env("CAWIDE_SOCKET", "/tmp/nonexistent-cawide.sock")
         .stdin(Stdio::piped())
@@ -277,7 +215,7 @@ fn test_cli_hook_hanging_stdin_timeout() {
 async fn test_e2e_hook_agent_status_changed() {
     let tmp = tempfile::tempdir().unwrap();
     let launch = format!(
-        "sh -c 'sleep 1; echo \"{{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"last_assistant_message\\\":\\\"done\\\"}}\" | {} hook codex; sleep 5'",
+        "sh -c 'sleep 1; echo \"{{\\\"finalTextHead\\\":\\\"done\\\",\\\"finalTextTail\\\":\\\"done\\\"}}\" | {} hook omp --event agent_end; sleep 5'",
         env!("CARGO_BIN_EXE_cawide")
     );
     let config = CawideServerConfig {
@@ -336,7 +274,7 @@ async fn test_e2e_hook_agent_status_changed() {
         Some(HostEvent::SessionUpdated { summary }) => {
             assert_eq!(summary.session_id, "agent-sess");
             let state = summary.agent.expect("agent state present");
-            assert_eq!(state.agent, "codex");
+            assert_eq!(state.agent, "omp");
             assert_eq!(
                 state.status,
                 AgentStatus::Completed {
@@ -363,7 +301,7 @@ async fn test_e2e_hook_agent_status_changed() {
                 .expect("session must be listed");
             assert!(s.agent.is_some(), "agent must be set");
             let agent_state = s.agent.as_ref().unwrap();
-            assert_eq!(agent_state.agent, "codex");
+            assert_eq!(agent_state.agent, "omp");
             assert_eq!(
                 agent_state.status,
                 AgentStatus::Completed {
@@ -549,7 +487,15 @@ async fn test_server_bind_non_default_config_dir_skips_auto_setup() {
     let temp_home = tmp.path().join("home");
     let omp_agent_dir = temp_home.join(".omp/agent");
     std::fs::create_dir_all(&omp_agent_dir).unwrap();
-
+    let legacy_hooks = temp_home.join(".codex/hooks.json");
+    std::fs::create_dir_all(legacy_hooks.parent().unwrap()).unwrap();
+    let hooks_raw = serde_json::json!({
+        "hooks": {
+            "Stop": [{ "hooks": [{ "type": "command", "command": "/tmp/x/cawide hook codex --event Stop" }] }]
+        }
+    })
+    .to_string();
+    std::fs::write(&legacy_hooks, &hooks_raw).unwrap();
     let _restore = EnvRestore {
         home: std::env::var_os("HOME"),
         config_dir: std::env::var_os("CAWIDE_CONFIG_DIR"),
@@ -578,6 +524,11 @@ async fn test_server_bind_non_default_config_dir_skips_auto_setup() {
     assert!(
         !omp_agent_dir.join("extensions/cawide.js").exists(),
         "binding CawideServer with non-default config_dir must not run auto_setup_all into HOME"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&legacy_hooks).unwrap(),
+        hooks_raw,
+        "binding CawideServer with non-default config_dir must leave legacy .codex/hooks.json untouched"
     );
     server.shutdown().await.unwrap();
 }

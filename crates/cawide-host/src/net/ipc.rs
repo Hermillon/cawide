@@ -1,6 +1,6 @@
 //! Local daemon IPC over a Unix domain socket (u32-BE length-prefixed postcard frames).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -46,6 +46,10 @@ pub enum IpcRequest {
     ClaudePermission {
         event: ClaudeHookEvent,
         attention: crate::agent::map::AttentionSpec,
+    },
+    PrepareAgentSession {
+        agent: String,
+        cwd: PathBuf,
     },
 }
 
@@ -96,6 +100,9 @@ pub enum IpcResponse {
     },
     ClaudeReply(ClaudeReply),
     ClaudeDismissed,
+    AgentPrepared {
+        id: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +207,52 @@ pub fn default_ipc_path(config_dir: &Path) -> std::path::PathBuf {
     }
 }
 
+/// Returns the user's home directory.
+pub fn home_dir() -> std::io::Result<std::path::PathBuf> {
+    if let Some(h) = std::env::var_os("HOME") {
+        if !h.is_empty() {
+            return Ok(std::path::PathBuf::from(h));
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+            if !userprofile.is_empty() {
+                return Ok(std::path::PathBuf::from(userprofile));
+            }
+        }
+        if let (Some(drive), Some(path)) =
+            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+        {
+            let combined = format!("{}{}", drive.to_string_lossy(), path.to_string_lossy());
+            if !combined.is_empty() {
+                return Ok(std::path::PathBuf::from(combined));
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "HOME is not set; set CAWIDE_CONFIG_DIR",
+    ))
+}
+
+/// Returns the default cawide configuration directory (ignoring `CAWIDE_CONFIG_DIR`).
+pub fn default_config_dir() -> std::io::Result<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let legacy = home_dir()?.join(r".config\cawide");
+        if legacy.exists() {
+            return Ok(legacy);
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            if !local_app_data.is_empty() {
+                return Ok(std::path::PathBuf::from(local_app_data).join("cawide"));
+            }
+        }
+    }
+    Ok(home_dir()?.join(".config").join("cawide"))
+}
+
 /// Returns the cawide configuration directory.
 pub fn config_dir() -> std::io::Result<std::path::PathBuf> {
     if let Some(d) = std::env::var_os("CAWIDE_CONFIG_DIR") {
@@ -207,19 +260,9 @@ pub fn config_dir() -> std::io::Result<std::path::PathBuf> {
             return Ok(std::path::PathBuf::from(d));
         }
     }
-    #[cfg(windows)]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return Ok(std::path::PathBuf::from(appdata).join("cawide"));
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not found"))?;
-    Ok(std::path::PathBuf::from(home)
-        .join(".config")
-        .join("cawide"))
+    default_config_dir()
 }
+
 #[cfg(unix)]
 pub struct IpcListener {
     inner: UnixListener,
@@ -640,6 +683,23 @@ async fn handle_ipc_conn(mut stream: IpcStream, ctx: Arc<IpcContext>) -> Result<
             ctx.registry.unregister_agent_stream(&session_id, stream_id);
             return Ok(());
         }
+        IpcRequest::PrepareAgentSession { agent, cwd } => {
+            let agent_static = match agent.as_str() {
+                "codex" => "codex",
+                "opencode" => "opencode",
+                _ => {
+                    let resp = IpcResponse::Error("unsupported agent".into());
+                    write_length_prefixed(&mut stream, &resp, MAX_IPC_FRAME_SIZE).await?;
+                    stream.shutdown().await?;
+                    return Ok(());
+                }
+            };
+            let resp = match ctx.registry.observer_prepare(agent_static, cwd).await {
+                Ok(id) => IpcResponse::AgentPrepared { id },
+                Err(e) => IpcResponse::Error(e),
+            };
+            (resp, false)
+        }
         IpcRequest::ClaudeEvent(ev) => {
             let resp = crate::agent::claude::ingest_event(&ctx.registry, &ctx.broadcaster, ev);
             (resp, false)
@@ -883,10 +943,18 @@ pub async fn send_ipc_request(
     socket_path: &Path,
     req: &IpcRequest,
 ) -> Result<IpcResponse, NetError> {
+    send_ipc_request_with_timeout(socket_path, req, HANDSHAKE_STEP_TIMEOUT).await
+}
+
+pub async fn send_ipc_request_with_timeout(
+    socket_path: &Path,
+    req: &IpcRequest,
+    timeout: std::time::Duration,
+) -> Result<IpcResponse, NetError> {
     let mut stream = connect_ipc(socket_path).await?;
     write_length_prefixed(&mut stream, req, MAX_IPC_FRAME_SIZE).await?;
     let resp: Option<IpcResponse> = tokio::time::timeout(
-        HANDSHAKE_STEP_TIMEOUT,
+        timeout,
         read_length_prefixed(&mut stream, MAX_IPC_FRAME_SIZE),
     )
     .await
@@ -939,5 +1007,19 @@ mod tests {
         assert!(filtered.contains(&lan_192));
         assert!(filtered.contains(&public_v4));
         assert!(!filtered.contains(&public_v6)); // truncated by capacity 4
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_default_config_dir_uses_localappdata() {
+        let prev = std::env::var_os("LOCALAPPDATA");
+        std::env::set_var("LOCALAPPDATA", r"C:\Users\Test\AppData\Local");
+        let dir = default_config_dir().expect("default_config_dir");
+        assert!(dir.ends_with("cawide"));
+        assert!(dir.starts_with(r"C:\Users\Test\AppData\Local"));
+        match prev {
+            Some(v) => std::env::set_var("LOCALAPPDATA", v),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
     }
 }

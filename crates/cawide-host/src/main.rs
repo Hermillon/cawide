@@ -154,6 +154,12 @@ enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// Launch Codex or OpenCode with live phone status.
+    Agent {
+        agent: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     #[command(hide = true)]
     GitCredential {
         action: String,
@@ -183,49 +189,11 @@ enum ProfileCommand {
 }
 
 fn home_dir() -> Result<PathBuf> {
-    if let Some(h) = std::env::var_os("HOME") {
-        if !h.is_empty() {
-            return Ok(PathBuf::from(h));
-        }
-    }
-    #[cfg(windows)]
-    {
-        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-            if !userprofile.is_empty() {
-                return Ok(PathBuf::from(userprofile));
-            }
-        }
-        if let (Some(drive), Some(path)) =
-            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
-        {
-            let combined = format!("{}{}", drive.to_string_lossy(), path.to_string_lossy());
-            if !combined.is_empty() {
-                return Ok(PathBuf::from(combined));
-            }
-        }
-    }
-    bail!("HOME is not set; set CAWIDE_CONFIG_DIR")
+    Ok(cawide_host::net::ipc::home_dir()?)
 }
 
 fn config_dir() -> Result<PathBuf> {
-    if let Some(d) = std::env::var_os("CAWIDE_CONFIG_DIR") {
-        if !d.is_empty() {
-            return Ok(PathBuf::from(d));
-        }
-    }
-    #[cfg(windows)]
-    {
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            if !local_app_data.is_empty() {
-                return Ok(PathBuf::from(local_app_data).join("cawide"));
-            }
-        }
-        let legacy = home_dir()?.join(".config\\cawide");
-        if legacy.exists() {
-            return Ok(legacy);
-        }
-    }
-    Ok(home_dir()?.join(".config/cawide"))
+    Ok(cawide_host::net::ipc::config_dir()?)
 }
 
 fn main() -> Result<()> {
@@ -258,6 +226,9 @@ fn main() -> Result<()> {
         }
         std::process::exit(0);
     }
+    if let Some(Command::Agent { agent, args }) = &cli.command {
+        cawide_host::agent::launch::run_agent(agent, args);
+    }
     if let Some(Command::GitCredential { action, config_dir }) = &cli.command {
         cawide_host::forge::helper::run_git_credential(action, config_dir.clone());
         std::process::exit(0);
@@ -280,7 +251,9 @@ fn main() -> Result<()> {
 
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Some(Command::Hook { .. }) | Some(Command::GitCredential { .. }) => unreachable!(),
+        Some(Command::Hook { .. })
+        | Some(Command::GitCredential { .. })
+        | Some(Command::Agent { .. }) => unreachable!(),
         Some(Command::Setup { agent, remove }) => {
             let summary = cawide_host::agent::setup::run_setup(
                 &home_dir()?,

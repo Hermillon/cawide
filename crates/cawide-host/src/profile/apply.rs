@@ -415,14 +415,9 @@ pub fn apply_profile(
 
     // 7. Re-install Cawide hooks
     for agent in &manifest.agents {
-        if agent == "claude" {
-            continue;
-        }
         let targets: &[&str] = match agent.as_str() {
-            "codex" => &[".codex/config.toml", ".codex/hooks.json"],
             "omp" => &[".omp/agent/extensions/cawide.js"],
-            "opencode" => &[".config/opencode/plugins/cawide.js"],
-            _ => &[],
+            _ => continue,
         };
 
         let mut guarded_ancestor = None;

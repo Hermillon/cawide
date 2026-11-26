@@ -157,26 +157,6 @@ echo "cawide xdg-open: unable to open target" >&2
 exit 1
 "#;
 
-pub const CODEX_SCRIPT: &str = r#"#!/bin/sh
-BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-REAL_BIN=""
-IFS=':'
-for p in $PATH; do
-    if [ "$p" != "$BIN_DIR" ] && [ -x "$p/codex" ] && [ ! "$p/codex" -ef "$BIN_DIR/codex" ]; then
-        REAL_BIN="$p/codex"
-        break
-    fi
-done
-unset IFS
-
-if [ -z "$REAL_BIN" ]; then
-    echo "cawide shim: codex not found in PATH" >&2
-    exit 127
-fi
-
-exec "$REAL_BIN" --enable hooks --dangerously-bypass-hook-trust "$@"
-"#;
-
 const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -336,32 +316,6 @@ fi
 exec "$REAL_BIN" "$@"
 "#;
 
-pub const OPENCODE_SCRIPT: &str = r#"#!/bin/sh
-BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-if [ -x "$BIN_DIR/cawide" ]; then
-    "$BIN_DIR/cawide" setup opencode >/dev/null 2>&1 || true
-elif command -v cawide >/dev/null 2>&1; then
-    cawide setup opencode >/dev/null 2>&1 || true
-fi
-
-REAL_BIN=""
-IFS=':'
-for p in $PATH; do
-    if [ "$p" != "$BIN_DIR" ] && [ -x "$p/opencode" ] && [ ! "$p/opencode" -ef "$BIN_DIR/opencode" ]; then
-        REAL_BIN="$p/opencode"
-        break
-    fi
-done
-unset IFS
-
-if [ -z "$REAL_BIN" ]; then
-    echo "cawide shim: opencode not found in PATH" >&2
-    exit 127
-fi
-
-exec "$REAL_BIN" "$@"
-"#;
-
 fn write_executable(path: &Path, content: &str) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(path);
     std::fs::write(path, content)?;
@@ -442,12 +396,16 @@ pub fn ensure_shims(config_dir: &Path) -> anyhow::Result<PathBuf> {
     write_executable(&bin_dir.join("cawide-open"), CAWIDE_OPEN_SCRIPT)?;
     write_executable(&bin_dir.join("open"), OPEN_SCRIPT)?;
     write_executable(&bin_dir.join("xdg-open"), XDG_OPEN_SCRIPT)?;
-    write_executable(&bin_dir.join("codex"), CODEX_SCRIPT)?;
+    for legacy in ["codex", "opencode"] {
+        if let Err(e) = std::fs::remove_file(bin_dir.join(legacy)) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
+        }
+    }
     write_claude_settings(config_dir)?;
     write_executable(&bin_dir.join("claude"), &claude_script(config_dir))?;
     write_executable(&bin_dir.join("omp"), OMP_SCRIPT)?;
-    write_executable(&bin_dir.join("opencode"), OPENCODE_SCRIPT)?;
-
     ensure_shell_integration(config_dir)?;
 
     Ok(bin_dir)

@@ -79,6 +79,7 @@ pub struct CawideServer {
     connections: Arc<ConnectionTracker>,
     broadcaster: Arc<HostEventBroadcaster>,
     _probe: SessionProbe,
+    _observers: Option<crate::agent::observe::ObserverHub>,
     _ports: PortWatcher,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     ipc_task: tokio::task::JoinHandle<()>,
@@ -128,9 +129,11 @@ impl CawideServer {
         let broadcaster = Arc::new(HostEventBroadcaster::new(HOST_EVENT_CAPACITY));
         let bin_dir = crate::net::shims::ensure_shims(&config.config_dir)
             .map_err(|e| NetError::Shims(e.to_string()))?;
-        if crate::net::config_dir().is_ok_and(|d| d == config.config_dir) {
-            if let Some(home) = std::env::var_os("HOME") {
-                let home_path = PathBuf::from(home);
+        if crate::net::ipc::default_config_dir().is_ok_and(|d| d == config.config_dir) {
+            if let Ok(home_path) = crate::net::ipc::home_dir() {
+                for action in crate::agent::setup::remove_legacy_codex_opencode(&home_path) {
+                    tracing::info!("{action}");
+                }
                 let exe_path = bin_dir.join("cawide");
                 let _ = crate::agent::setup::auto_setup_all(&home_path, &exe_path);
             }
@@ -192,17 +195,21 @@ impl CawideServer {
         ];
         let (alert_tx, alert_rx) = tokio::sync::mpsc::channel(64);
         let (activity_tx, activity_rx) = tokio::sync::mpsc::channel(128);
-        let registry = Arc::new(
-            SessionRegistry::new(
-                canonical_workdir.clone(),
-                config.launch_cmd,
-                base_env,
-                Arc::clone(&broadcaster),
-            )
-            .with_config_dir(config.config_dir.clone())
-            .with_alert_sender(alert_tx)
-            .with_activity_sender(activity_tx),
-        );
+        let obs_paths = crate::agent::observe::ObserverPaths::from_env();
+        let (obs_tx, obs_rx) = tokio::sync::mpsc::channel(16);
+        let mut reg = SessionRegistry::new(
+            canonical_workdir.clone(),
+            config.launch_cmd,
+            base_env,
+            Arc::clone(&broadcaster),
+        )
+        .with_config_dir(config.config_dir.clone())
+        .with_alert_sender(alert_tx)
+        .with_activity_sender(activity_tx);
+        if obs_paths.is_some() {
+            reg = reg.with_observer_sender(obs_tx);
+        }
+        let registry = Arc::new(reg);
         let watchers = if config.watch_workspace {
             Some(RootWatchers::new(
                 Arc::clone(&broadcaster),
@@ -212,6 +219,14 @@ impl CawideServer {
             None
         };
         let _probe = SessionProbe::spawn(Arc::clone(&registry), Arc::clone(&broadcaster), watchers);
+        let _observers = obs_paths.map(|paths| {
+            crate::agent::observe::ObserverHub::spawn(
+                Arc::clone(&registry),
+                Arc::clone(&broadcaster),
+                paths,
+                obs_rx,
+            )
+        });
         let _ports = PortWatcher::spawn(
             Arc::clone(&registry),
             Arc::clone(&broadcaster),
@@ -396,6 +411,7 @@ impl CawideServer {
             connections,
             broadcaster,
             _probe,
+            _observers,
             _ports,
             shutdown_tx,
             ipc_task,

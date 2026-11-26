@@ -42,7 +42,7 @@ Then scan the QR code displayed in your terminal using the **Cawide for iPhone**
 - `cawide stop`: Stop the running daemon
 - `cawide pair`: Generate a fresh pairing QR code for a running daemon
 - `cawide open <port>`: Open a localhost port or URL in the Cawide browser on your phone
-- `cawide setup <agent>`: Install integration hooks for `claude`, `codex`, `omp`, or `opencode`
+- `cawide setup <agent>`: Install integration hooks for `omp` (`claude` works automatically via launcher shim; `codex` and `opencode` are observed through their own servers via `cawide agent <codex|opencode>`)
 
 For full documentation, command flags, architecture, and source code, visit the [Hermillon/cawide GitHub Repository](https://github.com/Hermillon/cawide).
 

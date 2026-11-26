@@ -27,8 +27,8 @@ pub use hooks::CawideEndpointHooks;
 pub use identity::load_or_create_host_key;
 pub use ipc::{
     bind_ipc_listener, config_dir, connect_ipc, default_ipc_path, filter_direct_addrs,
-    send_ipc_request, IpcClientStream, IpcContext, IpcListener, IpcRequest, IpcResponse, IpcStream,
-    IpcStreamIn, IpcStreamOut,
+    send_ipc_request, send_ipc_request_with_timeout, IpcClientStream, IpcContext, IpcListener,
+    IpcRequest, IpcResponse, IpcStream, IpcStreamIn, IpcStreamOut,
 };
 pub use probe::SessionProbe;
 pub use registry::{validate_session_id, SessionRegistry};

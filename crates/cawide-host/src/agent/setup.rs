@@ -3,16 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use toml_edit::{value, Array, DocumentMut, Item, Table};
-
-const CODEX_EVENTS: &[&str] = &[
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PermissionRequest",
-    "Stop",
-];
+use toml_edit::{DocumentMut, Item};
 
 const TELEMETRY_MARKER: &str = "// cawide-telemetry";
 const TELEMETRY_MARKER_V3: &str = "// cawide-telemetry v3";
@@ -79,125 +70,6 @@ fn is_our_hook_group(group: &serde_json::Value, agent: &str) -> bool {
         }
     }
     false
-}
-
-fn update_json_hooks(
-    path: &Path,
-    abs_exe: &Path,
-    agent: &str,
-    events: &[&str],
-    remove: bool,
-) -> anyhow::Result<()> {
-    let mut root: serde_json::Value = if path.exists() {
-        backup_file_if_exists(path)?;
-        let content =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let parsed: serde_json::Value = serde_json::from_str(&content)
-            .with_context(|| format!("parsing {}: invalid JSON", path.display()))?;
-        if !parsed.is_object() {
-            anyhow::bail!("{}: top-level value must be a JSON object", path.display());
-        }
-        parsed
-    } else {
-        if remove {
-            return Ok(());
-        }
-        serde_json::json!({})
-    };
-
-    if remove {
-        let Some(hooks_obj) = root.get_mut("hooks").and_then(|v| v.as_object_mut()) else {
-            return Ok(());
-        };
-        let mut modified = false;
-        for event in events {
-            if let Some(groups) = hooks_obj.get_mut(*event).and_then(|v| v.as_array_mut()) {
-                let orig_len = groups.len();
-                groups.retain(|g| !is_our_hook_group(g, agent));
-                if groups.len() != orig_len {
-                    modified = true;
-                }
-            }
-            if hooks_obj
-                .get(*event)
-                .and_then(|v| v.as_array())
-                .is_some_and(|a| a.is_empty())
-            {
-                hooks_obj.remove(*event);
-                modified = true;
-            }
-        }
-        if hooks_obj.is_empty() {
-            if let Some(map) = root.as_object_mut() {
-                map.remove("hooks");
-                modified = true;
-            }
-        }
-        if !modified {
-            return Ok(());
-        }
-    } else {
-        match root.get("hooks") {
-            None => {
-                if let Some(map) = root.as_object_mut() {
-                    map.insert("hooks".into(), serde_json::json!({}));
-                }
-            }
-            Some(v) if v.is_object() => {}
-            Some(_) => {
-                anyhow::bail!("{}: 'hooks' exists but is not an object", path.display());
-            }
-        }
-        let hooks_obj = root
-            .get_mut("hooks")
-            .and_then(|v| v.as_object_mut())
-            .ok_or_else(|| anyhow::anyhow!("{}: 'hooks' is not an object", path.display()))?;
-        for event in events {
-            let cmd = if cfg!(windows) {
-                let exe_str = abs_exe.to_string_lossy().replace('"', "\\\"");
-                format!("\"{exe_str}\" hook {agent} --event {event}")
-            } else {
-                let escaped_exe = abs_exe.display().to_string().replace('\'', "'\\''");
-                format!("'{escaped_exe}' hook {agent} --event {event}")
-            };
-            let our_group = serde_json::json!({
-                "hooks": [
-                    { "type": "command", "command": cmd }
-                ]
-            });
-
-            match hooks_obj.get(*event) {
-                None => {
-                    hooks_obj.insert((*event).into(), serde_json::json!([]));
-                }
-                Some(v) if v.is_array() => {}
-                Some(_) => {
-                    anyhow::bail!(
-                        "{}: 'hooks.{}' exists but is not an array",
-                        path.display(),
-                        event
-                    );
-                }
-            }
-            let groups = hooks_obj
-                .get_mut(*event)
-                .and_then(|v| v.as_array_mut())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{}: 'hooks.{}' is not an array", path.display(), event)
-                })?;
-            let existing_idx = groups.iter().position(|g| is_our_hook_group(g, agent));
-            if let Some(idx) = existing_idx {
-                groups[idx] = our_group;
-            } else {
-                groups.push(our_group);
-            }
-        }
-    }
-
-    let mut formatted = serde_json::to_string_pretty(&root)?;
-    formatted.push('\n');
-    atomic_write(path, formatted.as_bytes())?;
-    Ok(())
 }
 
 fn is_legacy_claude_hook_group(group: &serde_json::Value) -> bool {
@@ -270,73 +142,187 @@ fn is_our_codex_notify(item: &Item) -> bool {
     false
 }
 
-fn setup_codex(home: &Path, abs_exe: &Path, remove: bool) -> anyhow::Result<String> {
-    let codex_dir = home.join(".codex");
-    let config_path = codex_dir.join("config.toml");
-    let hooks_path = codex_dir.join("hooks.json");
+/// Best-effort cleanup of legacy Cawide hooks, notify entries, OpenCode plugins,
+/// and `.cawide-bak` backups for Codex and OpenCode. Never fails; logs warnings.
+pub fn remove_legacy_codex_opencode(home: &Path) -> Vec<String> {
+    let mut actions = Vec::new();
 
-    let mut summary = String::new();
+    // 1. Clean ~/.codex/hooks.json
+    let hooks_path = home.join(".codex/hooks.json");
+    let mut removed_cawide_hooks = false;
+    let mut user_hooks_remain = false;
 
-    if remove {
-        if config_path.exists() {
-            backup_file_if_exists(&config_path)?;
-            let content = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {}", config_path.display()))?;
-            let mut doc = content.parse::<DocumentMut>()?;
-            if doc.get("notify").is_some_and(is_our_codex_notify) {
-                doc.as_table_mut().remove("notify");
-                summary.push_str("Removed cawide notify from config.toml. ");
-                atomic_write(&config_path, doc.to_string().as_bytes())?;
-            }
+    if hooks_path.exists() {
+        match std::fs::read_to_string(&hooks_path) {
+            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(mut root) => {
+                    if let Some(root_obj) = root.as_object_mut() {
+                        if let Some(hooks_obj) =
+                            root_obj.get_mut("hooks").and_then(|v| v.as_object_mut())
+                        {
+                            let mut empty_events = Vec::new();
+                            for (event, val) in hooks_obj.iter_mut() {
+                                let Some(groups) = val.as_array_mut() else {
+                                    user_hooks_remain = true;
+                                    continue;
+                                };
+                                let orig_len = groups.len();
+                                groups.retain(|g| !is_our_hook_group(g, "codex"));
+                                if groups.len() != orig_len {
+                                    removed_cawide_hooks = true;
+                                }
+                                if groups.is_empty() {
+                                    empty_events.push(event.clone());
+                                } else {
+                                    user_hooks_remain = true;
+                                }
+                            }
+                            for event in empty_events {
+                                hooks_obj.remove(&event);
+                            }
+                            if hooks_obj.is_empty() {
+                                root_obj.remove("hooks");
+                            }
+                        }
+                        if removed_cawide_hooks {
+                            if root_obj.is_empty() {
+                                match std::fs::remove_file(&hooks_path) {
+                                    Ok(()) => actions
+                                        .push(format!("Removed legacy {}", hooks_path.display())),
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(e) => tracing::warn!(
+                                        "Failed to remove {}: {e}",
+                                        hooks_path.display()
+                                    ),
+                                }
+                            } else {
+                                match serde_json::to_string_pretty(&root) {
+                                    Ok(mut formatted) => {
+                                        formatted.push('\n');
+                                        match atomic_write(&hooks_path, formatted.as_bytes()) {
+                                            Ok(()) => actions.push(format!(
+                                                "Cleaned legacy cawide hooks from {}",
+                                                hooks_path.display()
+                                            )),
+                                            Err(e) => tracing::warn!(
+                                                "Failed to write {}: {e}",
+                                                hooks_path.display()
+                                            ),
+                                        }
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        "Failed to serialize {}: {e}",
+                                        hooks_path.display()
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping invalid JSON in {}: {e}", hooks_path.display());
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("Failed to read {}: {e}", hooks_path.display()),
         }
-    } else {
-        let mut doc = if config_path.exists() {
-            backup_file_if_exists(&config_path)?;
-            let content = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {}", config_path.display()))?;
-            content.parse::<DocumentMut>()?
-        } else {
-            DocumentMut::new()
-        };
-
-        let features = doc.entry("features").or_insert(Item::Table(Table::new()));
-        let tbl = features.as_table_like_mut().ok_or_else(|| {
-            anyhow::anyhow!("{}: [features] is not a table", config_path.display())
-        })?;
-        tbl.insert("hooks", value(true));
-
-        if let Some(item) = doc.get("notify") {
-            if is_our_codex_notify(item) {
-                let mut arr = Array::new();
-                arr.push(abs_exe.display().to_string());
-                arr.push("hook");
-                arr.push("codex");
-                doc["notify"] = Item::Value(toml_edit::Value::Array(arr));
-                summary.push_str("Updated cawide notify in config.toml. ");
-            } else {
-                summary.push_str(&format!(
-                    "Keeping existing foreign notify ({item}) in config.toml. "
-                ));
-            }
-        } else {
-            let mut arr = Array::new();
-            arr.push(abs_exe.display().to_string());
-            arr.push("hook");
-            arr.push("codex");
-            doc["notify"] = Item::Value(toml_edit::Value::Array(arr));
-            summary.push_str("Set cawide notify in config.toml. ");
-        }
-
-        atomic_write(&config_path, doc.to_string().as_bytes())?;
     }
 
-    update_json_hooks(&hooks_path, abs_exe, "codex", CODEX_EVENTS, remove)?;
-    if remove {
-        summary.push_str("Codex hooks removed from hooks.json.");
-    } else {
-        summary.push_str("Codex hooks configured in hooks.json. Codex ignores new or changed hooks until you approve them: run /hooks inside Codex once.");
+    // 2. Clean ~/.codex/config.toml
+    let config_path = home.join(".codex/config.toml");
+    if config_path.exists() {
+        match std::fs::read_to_string(&config_path) {
+            Ok(content) => match content.parse::<DocumentMut>() {
+                Ok(mut doc) => {
+                    let mut removed_notify = false;
+                    let mut changed = false;
+                    if doc.get("notify").is_some_and(is_our_codex_notify) {
+                        doc.as_table_mut().remove("notify");
+                        removed_notify = true;
+                        changed = true;
+                    }
+                    let should_remove_features_hooks =
+                        removed_notify || (removed_cawide_hooks && !user_hooks_remain);
+                    if should_remove_features_hooks {
+                        let hooks_is_true = doc
+                            .get("features")
+                            .and_then(|f| f.as_table_like())
+                            .and_then(|t| t.get("hooks"))
+                            .and_then(|v| v.as_bool())
+                            == Some(true);
+                        if hooks_is_true {
+                            let mut features_empty = false;
+                            if let Some(tbl) =
+                                doc.get_mut("features").and_then(|f| f.as_table_like_mut())
+                            {
+                                tbl.remove("hooks");
+                                features_empty = tbl.is_empty();
+                                changed = true;
+                            }
+                            if features_empty {
+                                doc.as_table_mut().remove("features");
+                            }
+                        }
+                    }
+                    if changed {
+                        match atomic_write(&config_path, doc.to_string().as_bytes()) {
+                            Ok(()) => actions.push(format!(
+                                "Cleaned legacy cawide entries from {}",
+                                config_path.display()
+                            )),
+                            Err(e) => {
+                                tracing::warn!("Failed to write {}: {e}", config_path.display())
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping invalid TOML in {}: {e}", config_path.display());
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("Failed to read {}: {e}", config_path.display()),
+        }
     }
-    Ok(summary)
+
+    // 3. Delete ~/.config/opencode/{plugins,plugin}/cawide.js only if marker matches
+    for rel in [
+        ".config/opencode/plugins/cawide.js",
+        ".config/opencode/plugin/cawide.js",
+    ] {
+        let path = home.join(rel);
+        match std::fs::read_to_string(&path) {
+            Ok(content) if content.starts_with(TELEMETRY_MARKER) => {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => actions.push(format!("Removed legacy {}", path.display())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => tracing::warn!("Failed to remove {}: {e}", path.display()),
+                }
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("Failed to read {}: {e}", path.display()),
+        }
+    }
+
+    // 4. Delete legacy .cawide-bak files if present
+    for rel in [
+        ".codex/config.toml.cawide-bak",
+        ".codex/hooks.json.cawide-bak",
+        ".config/opencode/plugins/cawide.js.cawide-bak",
+        ".config/opencode/plugin/cawide.js.cawide-bak",
+    ] {
+        let path = home.join(rel);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => actions.push(format!("Removed legacy backup {}", path.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!("Failed to remove {}: {e}", path.display()),
+            }
+        }
+    }
+
+    actions
 }
 
 fn setup_marker_file(
@@ -658,50 +644,6 @@ if (currentProc === p) currentProc = null;\n  \
     setup_marker_file(&path, &content, remove, "OMP")
 }
 
-fn setup_opencode(home: &Path, abs_exe: &Path, remove: bool) -> anyhow::Result<String> {
-    let path = home.join(".config/opencode/plugins/cawide.js");
-    let exe_js = serde_json::to_string(&abs_exe.display().to_string())?;
-    let content = format!(
-        "{TELEMETRY_MARKER_V3}\n\
-export default {{\n  \
-id: \"cawide\",\n  \
-async setup(context) {{\n    \
-if (!process.env.CAWIDE_SESSION_ID || !process.env.CAWIDE_SOCKET) return;\n    \
-if (!context?.event?.subscribe) return;\n    \
-    const binName = process.platform === \"win32\" ? \"cawide.exe\" : \"cawide\";\n    \
-const bin = process.env.CAWIDE_BIN_DIR ? `${{process.env.CAWIDE_BIN_DIR}}/${{binName}}` : {exe_js};\n    \
-let spawn = globalThis.Bun?.spawn;\n    \
-if (!spawn) {{\n      \
-try {{\n        \
-const cp = await import(\"node:child_process\");\n        \
-spawn = (args, _opts) => {{\n          \
-const child = cp.spawn(args[0], args.slice(1), {{ stdio: \"ignore\", detached: true }});\n          \
-child.unref();\n          \
-return child;\n        \
-}};\n      \
-}} catch {{}}\n    \
-}}\n    \
-if (!spawn) return;\n    \
-try {{\n      \
-const sub = await context.event.subscribe();\n      \
-for await (const event of sub) {{\n        \
-if (!event || !event.type) continue;\n        \
-const directory = event.location?.directory || process.cwd();\n        \
-const payload = {{\n          \
-...(event.data ?? event.properties ?? {{}}),\n          \
-directory,\n        }};\n        \
-try {{\n          \
-spawn([bin, \"hook\", \"opencode\", \"--event\", event.type, JSON.stringify(payload)], {{ stdout: \"ignore\", stderr: \"ignore\" }});\n        \
-}} catch {{}}\n      \
-}}\n    \
-}} catch {{}}\n  \
-}}\n\
-}};\n"
-    );
-
-    setup_marker_file(&path, &content, remove, "OpenCode")
-}
-
 pub fn run_setup(home: &Path, exe: &Path, agent: &str, remove: bool) -> anyhow::Result<String> {
     let abs_exe = if exe.is_absolute() {
         exe.to_path_buf()
@@ -719,12 +661,11 @@ pub fn run_setup(home: &Path, exe: &Path, agent: &str, remove: bool) -> anyhow::
                 Ok("Claude Code requires no global setup (managed via Cawide launcher).".into())
             }
         }
-        "codex" => setup_codex(home, &abs_exe, remove),
+        "codex" | "opencode" => {
+            anyhow::bail!("{agent} needs no setup: cawide observes it through its own server")
+        }
         "omp" => setup_omp(home, &abs_exe, remove),
-        "opencode" => setup_opencode(home, &abs_exe, remove),
-        other => anyhow::bail!(
-            "unsupported agent: '{other}'; supported agents: claude, codex, omp, opencode"
-        ),
+        other => anyhow::bail!("unsupported agent: '{other}'; supported agents: claude, omp"),
     }
 }
 
@@ -735,19 +676,9 @@ pub fn auto_setup_all(home: &Path, exe: &Path) -> std::io::Result<()> {
             tracing::warn!("Failed to clean legacy claude hooks: {e}");
         }
     }
-    if home.join(".codex").exists() {
-        if let Err(e) = run_setup(home, exe, "codex", false) {
-            tracing::warn!("Auto-setup for codex failed: {e}");
-        }
-    }
     if home.join(".omp/agent").exists() {
         if let Err(e) = run_setup(home, exe, "omp", false) {
             tracing::warn!("Auto-setup for omp failed: {e}");
-        }
-    }
-    if home.join(".config/opencode").exists() {
-        if let Err(e) = run_setup(home, exe, "opencode", false) {
-            tracing::warn!("Auto-setup for opencode failed: {e}");
         }
     }
     Ok(())
@@ -872,5 +803,137 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&target).unwrap()).unwrap();
         assert_eq!(parsed, serde_json::json!({ "model": "sonnet" }));
+    }
+
+    #[test]
+    fn remove_legacy_codex_opencode_cleans_notify_and_hooks_preserving_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let toml = "# user comment\nmodel = \"gpt-5\"\nnotify = [\"/usr/bin/cawide\", \"hook\", \"codex\"]\n\n[features]\nhooks = true\n";
+        std::fs::write(codex_dir.join("config.toml"), toml).unwrap();
+
+        let actions = super::remove_legacy_codex_opencode(home);
+        assert_eq!(actions.len(), 1);
+        let updated = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        assert_eq!(updated, "# user comment\nmodel = \"gpt-5\"\n");
+        assert!(super::remove_legacy_codex_opencode(home).is_empty());
+    }
+
+    #[test]
+    fn remove_legacy_codex_opencode_foreign_notify_and_hooks_json_variants() {
+        // (b) foreign notify + cawide-only hooks.json -> features.hooks removed, notify kept, hooks.json deleted
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let codex_dir = home.join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("config.toml"),
+            "notify = [\"custom\", \"script\"]\n\n[features]\nhooks = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "Stop": [{ "hooks": [{ "type": "command", "command": "/tmp/ck-x/bin/cawide hook codex --event Stop" }] }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let actions = super::remove_legacy_codex_opencode(home);
+        assert_eq!(actions.len(), 2);
+        assert!(!codex_dir.join("hooks.json").exists());
+        let toml = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        assert!(toml.contains("custom"));
+        assert!(!toml.contains("hooks"));
+
+        // (b2) foreign notify + user hook group -> features.hooks and user group kept
+        let tmp2 = tempfile::tempdir().unwrap();
+        let home2 = tmp2.path();
+        let codex_dir2 = home2.join(".codex");
+        std::fs::create_dir_all(&codex_dir2).unwrap();
+        std::fs::write(
+            codex_dir2.join("config.toml"),
+            "notify = [\"custom\"]\n\n[features]\nhooks = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            codex_dir2.join("hooks.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "Stop": [
+                        { "hooks": [{ "type": "command", "command": "/tmp/ck-x/bin/cawide hook codex --event Stop" }] },
+                        { "hooks": [{ "type": "command", "command": "echo user" }] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let actions2 = super::remove_legacy_codex_opencode(home2);
+        assert_eq!(actions2.len(), 1);
+        let hooks2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(codex_dir2.join("hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(hooks2["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            hooks2["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "echo user"
+        );
+        let toml2 = std::fs::read_to_string(codex_dir2.join("config.toml")).unwrap();
+        assert!(toml2.contains("hooks = true"));
+        assert!(super::remove_legacy_codex_opencode(home2).is_empty());
+    }
+
+    #[test]
+    fn remove_legacy_codex_opencode_plugins_backups_and_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let plugins_dir = home.join(".config/opencode/plugins");
+        let plugin_dir = home.join(".config/opencode/plugin");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+
+        // Marker plugin deleted; non-marker stub kept
+        std::fs::write(plugins_dir.join("cawide.js"), "// cawide-telemetry v3\n").unwrap();
+        std::fs::write(plugin_dir.join("cawide.js"), "export default () => {};\n").unwrap();
+        std::fs::write(home.join(".codex/config.toml.cawide-bak"), "bak").unwrap();
+        std::fs::write(home.join(".codex/hooks.json.cawide-bak"), "bak").unwrap();
+        std::fs::write(plugins_dir.join("cawide.js.cawide-bak"), "bak").unwrap();
+
+        let actions = super::remove_legacy_codex_opencode(home);
+        assert_eq!(actions.len(), 4);
+        assert!(!plugins_dir.join("cawide.js").exists());
+        assert!(plugin_dir.join("cawide.js").exists());
+        assert!(!home.join(".codex/config.toml.cawide-bak").exists());
+        assert!(!home.join(".codex/hooks.json.cawide-bak").exists());
+        assert!(!plugins_dir.join("cawide.js.cawide-bak").exists());
+        assert!(super::remove_legacy_codex_opencode(home).is_empty());
+
+        // (e) symlinked .config dir -> marker plugin still deleted
+        #[cfg(unix)]
+        {
+            let tmp_sym = tempfile::tempdir().unwrap();
+            let real_cfg = tmp_sym.path().join("dotfiles-config");
+            std::fs::create_dir_all(real_cfg.join("opencode/plugins")).unwrap();
+            std::fs::write(
+                real_cfg.join("opencode/plugins/cawide.js"),
+                "// cawide-telemetry v2\n",
+            )
+            .unwrap();
+            let sym_home = tmp_sym.path().join("home");
+            std::fs::create_dir_all(&sym_home).unwrap();
+            std::os::unix::fs::symlink(&real_cfg, sym_home.join(".config")).unwrap();
+
+            let sym_actions = super::remove_legacy_codex_opencode(&sym_home);
+            assert_eq!(sym_actions.len(), 1);
+            assert!(!real_cfg.join("opencode/plugins/cawide.js").exists());
+        }
     }
 }

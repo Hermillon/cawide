@@ -392,7 +392,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cawide-account"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "hex",
@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "cawide-host"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -418,6 +418,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "flate2",
  "fs4",
+ "futures-util",
  "hex",
  "ignore",
  "iroh",
@@ -446,6 +447,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-websockets",
  "toml_edit",
  "tracing",
  "tracing-subscriber",
@@ -457,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "cawide-protocol"
-version = "0.15.3"
+version = "0.16.0"
 dependencies = [
  "bytes",
  "criterion",
