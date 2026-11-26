@@ -548,12 +548,7 @@ pub fn collect_profile(
         }
     }
 
-    let hook_targets = [
-        ("codex", codex_staged.join("config.toml")),
-        ("codex", codex_staged.join("hooks.json")),
-        ("omp", omp_staged.join("extensions/cawide.js")),
-        ("opencode", opencode_cfg_staged.join("plugins/cawide.js")),
-    ];
+    let hook_targets = [("omp", omp_staged.join("extensions/cawide.js"))];
 
     let mut stripped_agents = HashSet::new();
     for (agent, target) in hook_targets {
@@ -567,6 +562,9 @@ pub fn collect_profile(
                 }
             }
         }
+    }
+    for action in crate::agent::setup::remove_legacy_codex_opencode(staging_home) {
+        tracing::debug!("staging cleanup: {action}");
     }
 
     // Delete *.cawide-bak in staging

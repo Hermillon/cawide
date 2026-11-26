@@ -1,6 +1,6 @@
 //! Agent hook execution (Brick 7).
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,40 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use crate::agent::map::map_signal;
 use crate::net::ipc::{connect_ipc, IpcClientStream, IpcRequest, IpcStreamIn, IpcStreamOut};
 use crate::net::{send_ipc_request, MAX_IPC_FRAME_SIZE};
-struct SyncStdoutGuard {
-    need_flush: bool,
-}
-
-impl SyncStdoutGuard {
-    fn new(agent: &str) -> Self {
-        Self {
-            need_flush: agent == "codex",
-        }
-    }
-
-    fn flush_now(&mut self) {
-        if self.need_flush {
-            let mut out = std::io::stdout().lock();
-            let _ = out.write_all(b"{}");
-            let _ = out.flush();
-            self.need_flush = false;
-        }
-    }
-}
-
-impl Drop for SyncStdoutGuard {
-    fn drop(&mut self) {
-        self.flush_now();
-    }
-}
-
 pub async fn run_hook(agent: &str, event: Option<&str>, payload_arg: Option<&str>) {
-    let mut stdout_guard = SyncStdoutGuard::new(agent);
-
-    if agent == "codex" && event == Some("Stop") {
-        stdout_guard.flush_now();
-    }
-
     let Some(session_id) = std::env::var("CAWIDE_SESSION_ID")
         .ok()
         .filter(|s| !s.is_empty())
@@ -75,10 +42,6 @@ pub async fn run_hook(agent: &str, event: Option<&str>, payload_arg: Option<&str
     } else {
         serde_json::Value::Null
     };
-
-    if agent == "codex" && payload.get("hook_event_name").and_then(|v| v.as_str()) == Some("Stop") {
-        stdout_guard.flush_now();
-    }
 
     let signal = match map_signal(agent, event, &payload) {
         Some(s) => s,

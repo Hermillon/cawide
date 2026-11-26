@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-const MAX_ARGV: usize = 4;
+const MAX_ARGV: usize = 16;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcInfo {
@@ -531,8 +531,17 @@ mod tests {
         buf.extend_from_slice(b"b\0");
 
         let args = parse_procargs2(&buf);
-        assert_eq!(args, vec!["node", "/x/cli.js", "--y", "a"]);
+        assert_eq!(args, vec!["node", "/x/cli.js", "--y", "a", "b"]);
 
+        let mut buf_cap = Vec::new();
+        buf_cap.extend_from_slice(&18i32.to_ne_bytes());
+        buf_cap.extend_from_slice(b"/bin/codex\0");
+        for i in 0..18 {
+            buf_cap.extend_from_slice(format!("arg{i}\0").as_bytes());
+        }
+        let capped = parse_procargs2(&buf_cap);
+        assert_eq!(capped.len(), MAX_ARGV);
+        assert_eq!(capped[15], "arg15");
         let truncated = &buf[..8];
         let args_trunc = parse_procargs2(truncated);
         assert!(args_trunc.is_empty());

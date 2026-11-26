@@ -58,7 +58,11 @@ chacha20poly1305 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+tokio-websockets = { version = "0.13", default-features = false, features = ["client", "getrandom", "rand", "sha1_smol", "rustls-bring-your-own-connector"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+tokio-websockets = { version = "0.13", default-features = false, features = ["server", "client", "getrandom", "rand", "sha1_smol"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",

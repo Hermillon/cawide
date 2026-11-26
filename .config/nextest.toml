@@ -9,7 +9,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 leak-timeout = "500ms"
 
 [[profile.default.overrides]]
-filter = 'package(cawide-host) & (binary(session_device_tests) | binary(session_output_tests) | binary(session_probe_tests) | binary(pty_integration) | binary(pty_session_tests) | binary(watch_tests) | binary(pty_chunked_tests))'
+filter = 'package(cawide-host) & (binary(session_device_tests) | binary(session_output_tests) | binary(session_probe_tests) | binary(pty_integration) | binary(pty_session_tests) | binary(watch_tests) | binary(pty_chunked_tests) | binary(observer_codex_tests) | binary(observer_opencode_tests) | binary(observer_fallback_tests))'
 test-group = 'pty-heavy'
 
 [[profile.default.overrides]]

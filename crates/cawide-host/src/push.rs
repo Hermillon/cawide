@@ -477,10 +477,12 @@ pub fn alert_kind_for_attention(kind: &crate::agent::map::AttentionKind) -> Agen
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn alert_for_tracker_transition(
     old: Option<&AgentState>,
     new: Option<&AgentState>,
     old_head_id: Option<u64>,
+    old_head_key: Option<&str>,
     new_head: Option<&crate::agent::tracker::Attention>,
     outcome: &crate::agent::map::TurnOutcome,
     old_turn_started_at: Option<u64>,
@@ -501,6 +503,10 @@ pub fn alert_for_tracker_transition(
     match &new_s.status {
         AgentStatus::WaitingForInput { .. } => {
             if let Some(head) = new_head {
+                if !head.actionable && head.key.as_deref().is_some_and(|k| Some(k) == old_head_key)
+                {
+                    return None;
+                }
                 if old_head_id != Some(head.id) {
                     return Some(alert_kind_for_attention(&head.kind));
                 }
@@ -1332,11 +1338,11 @@ mod tests {
             options: vec!["Execute".into()],
             actionable: true,
         };
-
         assert_eq!(
             alert_for_tracker_transition(
                 Some(&idle),
                 Some(&waiting),
+                None,
                 None,
                 Some(&ask_head),
                 &crate::agent::map::TurnOutcome::None,
@@ -1350,6 +1356,7 @@ mod tests {
                 Some(&waiting),
                 Some(&waiting),
                 Some(10),
+                None,
                 Some(&plan_head),
                 &crate::agent::map::TurnOutcome::None,
                 None,
@@ -1362,6 +1369,7 @@ mod tests {
             alert_for_tracker_transition(
                 Some(&idle),
                 Some(&completed),
+                None,
                 None,
                 None,
                 &crate::agent::map::TurnOutcome::Done,
@@ -1377,9 +1385,33 @@ mod tests {
                 Some(&completed),
                 None,
                 None,
+                None,
                 &crate::agent::map::TurnOutcome::Done,
                 Some(100),
                 1900,
+            ),
+            None
+        );
+
+        let non_actionable_head = crate::agent::tracker::Attention {
+            id: 10,
+            key: Some("obs:codex:th:1".into()),
+            kind: crate::agent::map::AttentionKind::Approval,
+            opened_at_ms: 152_000,
+            prompt: "Run command".into(),
+            options: vec!["Allow".into()],
+            actionable: false,
+        };
+        assert_eq!(
+            alert_for_tracker_transition(
+                Some(&waiting),
+                Some(&waiting),
+                Some(10),
+                Some("obs:codex:th:1"),
+                Some(&non_actionable_head),
+                &crate::agent::map::TurnOutcome::None,
+                None,
+                152,
             ),
             None
         );

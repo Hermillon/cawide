@@ -98,6 +98,10 @@ enum ActionPlan {
         key: String,
         reply: crate::net::ipc::ClaudeReply,
     },
+    Observer {
+        key: String,
+        choice: AgentChoice,
+    },
 }
 
 struct ValidatedTarget {
@@ -146,6 +150,33 @@ fn validate_target(
 
             let expected_id = if prompt_id != 0 { prompt_id } else { head.id };
             let expected_prompt = head.prompt.clone();
+            if let Some(k) = head
+                .key
+                .as_deref()
+                .filter(|k| k.starts_with(crate::agent::observe::OBSERVER_KEY_PREFIX))
+            {
+                if !head.actionable {
+                    return Err("unsupported choice".into());
+                }
+                match choice {
+                    AgentChoice::Option { index } => {
+                        if (*index as usize) >= head.options.len() {
+                            return Err("unsupported choice".into());
+                        }
+                    }
+                    AgentChoice::Text { text } => {
+                        let _ = sanitize_reply_text(text)?;
+                    }
+                }
+                return Ok(ValidatedTarget {
+                    expected_id,
+                    expected_prompt,
+                    plan: ActionPlan::Observer {
+                        key: k.to_string(),
+                        choice: choice.clone(),
+                    },
+                });
+            }
             let is_omp = state.agent == "omp";
             let is_claude = state.agent == "claude";
             if is_claude {
@@ -483,6 +514,13 @@ pub async fn respond_to_session(
         ActionPlan::ClaudeReply { key, reply } => {
             let _ = ensure_still_valid(registry, session_id, expected_id, &expected_prompt)?;
             registry.send_claude_reply(session_id, &key, expected_id, reply)?;
+            registry.touch(session_id);
+            registry.mark_input();
+            Ok(())
+        }
+        ActionPlan::Observer { key, choice } => {
+            let _ = ensure_still_valid(registry, session_id, expected_id, &expected_prompt)?;
+            registry.observer_respond(&key, choice).await?;
             registry.touch(session_id);
             registry.mark_input();
             Ok(())

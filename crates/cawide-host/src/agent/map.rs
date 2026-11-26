@@ -101,12 +101,7 @@ pub fn map_signal(
     });
 
     let mut signal = match agent {
-        "codex" => wrap_legacy_signal(
-            map_codex(resolved_event, payload)?,
-            matches!(resolved_event, Some("UserPromptSubmit")),
-        ),
         "omp" => map_omp_signal(resolved_event, payload)?,
-        "opencode" => wrap_legacy_signal(map_opencode(resolved_event, payload)?, false),
         _ => return None,
     };
 
@@ -126,41 +121,6 @@ pub fn map_event(
     map_signal(agent, event, payload).map(|s| s.status)
 }
 
-fn wrap_legacy_signal(status: AgentStatus, is_started: bool) -> AgentSignal {
-    let (attention, outcome, resolution) = match &status {
-        AgentStatus::WaitingForInput { prompt, options } => (
-            Some(AttentionSpec {
-                key: None,
-                kind: AttentionKind::Approval,
-                prompt: prompt.clone(),
-                options: options.clone(),
-                actionable: true,
-            }),
-            TurnOutcome::None,
-            SignalResolution::None,
-        ),
-        AgentStatus::Completed { .. } => (None, TurnOutcome::Done, SignalResolution::ClearNonPlan),
-        AgentStatus::Thinking { .. } => (
-            None,
-            if is_started {
-                TurnOutcome::Started
-            } else {
-                TurnOutcome::None
-            },
-            SignalResolution::ClearNonPlan,
-        ),
-        AgentStatus::Idle => (None, TurnOutcome::None, SignalResolution::ClearAll),
-    };
-    AgentSignal {
-        status,
-        attention,
-        outcome,
-        resolution,
-        seq: None,
-        epoch: None,
-    }
-}
-
 pub(crate) fn extract_target(tool_input: Option<&serde_json::Value>) -> &str {
     let Some(ti) = tool_input else {
         return "";
@@ -172,85 +132,7 @@ pub(crate) fn extract_target(tool_input: Option<&serde_json::Value>) -> &str {
         .unwrap_or("")
 }
 
-fn map_codex(event: Option<&str>, payload: &serde_json::Value) -> Option<AgentStatus> {
-    if event.is_none()
-        && payload.get("type").and_then(|v| v.as_str()) == Some("agent-turn-complete")
-    {
-        let summary = payload
-            .get("last-assistant-message")
-            .or_else(|| payload.get("last_assistant_message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        return Some(AgentStatus::Completed {
-            summary: truncate_chars(summary, 280),
-        });
-    }
-
-    match event? {
-        "SessionStart" | "SessionEnd" => Some(AgentStatus::Idle),
-        "UserPromptSubmit" => {
-            let prompt = payload.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-            Some(AgentStatus::Thinking {
-                task_desc: truncate_chars(prompt, 280),
-            })
-        }
-        "PermissionRequest" => {
-            let tool_name = payload
-                .get("tool_name")
-                .or_else(|| payload.get("toolName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let tool_input = payload
-                .get("tool_input")
-                .or_else(|| payload.get("toolInput"));
-            let target = extract_target(tool_input);
-            let prompt = if target.is_empty() {
-                format!("Approve {tool_name}")
-            } else {
-                format!("Approve {tool_name}: {target}")
-            };
-            Some(AgentStatus::WaitingForInput {
-                prompt: truncate_chars(&prompt, 280),
-                options: vec!["Allow".into(), "Deny".into()],
-            })
-        }
-        "PreToolUse" => {
-            let tool_name = payload
-                .get("tool_name")
-                .or_else(|| payload.get("toolName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let tool_input = payload
-                .get("tool_input")
-                .or_else(|| payload.get("toolInput"));
-            let target = extract_target(tool_input);
-            let desc = if target.is_empty() {
-                format!("Using {tool_name}")
-            } else {
-                format!("{tool_name}: {target}")
-            };
-            Some(AgentStatus::Thinking {
-                task_desc: truncate_chars(&desc, 280),
-            })
-        }
-        "PostToolUse" => Some(AgentStatus::Thinking {
-            task_desc: "Thinking…".into(),
-        }),
-        "Stop" => {
-            let summary = payload
-                .get("last_assistant_message")
-                .or_else(|| payload.get("last-assistant-message"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            Some(AgentStatus::Completed {
-                summary: truncate_chars(summary, 280),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn summarize_head(head: &str) -> String {
+pub(crate) fn summarize_head(head: &str) -> String {
     let mut out = String::new();
     for line in head.lines() {
         let trimmed = line.trim();
@@ -666,139 +548,6 @@ fn map_omp_signal(event: Option<&str>, payload: &serde_json::Value) -> Option<Ag
     }
 }
 
-fn map_opencode(event: Option<&str>, payload: &serde_json::Value) -> Option<AgentStatus> {
-    match event? {
-        "session.status" => {
-            if payload
-                .get("status")
-                .and_then(|s| s.get("type"))
-                .and_then(|v| v.as_str())
-                == Some("busy")
-            {
-                Some(AgentStatus::Thinking {
-                    task_desc: "Working".into(),
-                })
-            } else {
-                None
-            }
-        }
-        "permission.asked" => {
-            let action = payload
-                .get("action")
-                .or_else(|| payload.get("permission"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let resources = payload
-                .get("resources")
-                .or_else(|| payload.get("patterns"))
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let prompt = if action.is_empty() && resources.is_empty() {
-                "Approve permission request".to_string()
-            } else if resources.is_empty() {
-                format!("Approve {action}")
-            } else if action.is_empty() {
-                format!("Approve {resources}")
-            } else {
-                format!("Approve {action}: {resources}")
-            };
-            Some(AgentStatus::WaitingForInput {
-                prompt: truncate_chars(&prompt, 280),
-                options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
-            })
-        }
-        "session.reasoning.started" | "session.reasoning.delta" => {
-            let delta = payload
-                .get("text")
-                .or_else(|| payload.get("delta"))
-                .or_else(|| payload.get("content"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("Thinking…");
-            Some(AgentStatus::Thinking {
-                task_desc: truncate_chars(delta, 280),
-            })
-        }
-        "session.tool.called" => {
-            let tool = payload
-                .get("tool")
-                .or_else(|| payload.get("toolName"))
-                .or_else(|| payload.get("tool_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let cmd = payload
-                .get("command")
-                .or_else(|| payload.get("cmd"))
-                .or_else(|| payload.get("input").and_then(|i| i.get("command")))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let desc = if cmd.is_empty() {
-                format!("Using {tool}")
-            } else if tool.is_empty() {
-                cmd.to_string()
-            } else {
-                format!("{tool}: {cmd}")
-            };
-            Some(AgentStatus::Thinking {
-                task_desc: truncate_chars(&desc, 280),
-            })
-        }
-        "session.tool.success" | "session.tool.failed" => Some(AgentStatus::Thinking {
-            task_desc: "Thinking…".into(),
-        }),
-        "form.created" => {
-            let title = payload
-                .get("title")
-                .or_else(|| payload.get("prompt"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let mut options = Vec::new();
-            if let Some(arr) = payload.get("options").and_then(|v| v.as_array()) {
-                for item in arr.iter().take(8) {
-                    if let Some(s) = item.as_str() {
-                        options.push(truncate_chars(s, 80));
-                    } else if let Some(s) = item
-                        .get("label")
-                        .or_else(|| item.get("value"))
-                        .and_then(|v| v.as_str())
-                    {
-                        options.push(truncate_chars(s, 80));
-                    }
-                }
-            } else if let Some(fields) = payload.get("fields").and_then(|v| v.as_array()) {
-                for field in fields.iter().take(8) {
-                    if let Some(field_opts) = field.get("options").and_then(|v| v.as_array()) {
-                        for item in field_opts.iter().take(8 - options.len()) {
-                            if let Some(s) = item.as_str() {
-                                options.push(truncate_chars(s, 80));
-                            } else if let Some(s) = item
-                                .get("label")
-                                .or_else(|| item.get("value"))
-                                .and_then(|v| v.as_str())
-                            {
-                                options.push(truncate_chars(s, 80));
-                            }
-                        }
-                    }
-                }
-            }
-            Some(AgentStatus::WaitingForInput {
-                prompt: truncate_chars(title, 280),
-                options,
-            })
-        }
-        "session.idle" => Some(AgentStatus::Completed {
-            summary: String::new(),
-        }),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -814,62 +563,6 @@ mod tests {
         assert_eq!(map_event("", Some("SessionStart"), &json!({})), None);
         let too_long = "a".repeat(33);
         assert_eq!(map_event(&too_long, Some("SessionStart"), &json!({})), None);
-    }
-
-    #[test]
-    fn test_codex_lifecycle() {
-        let agent = "codex";
-        assert_eq!(
-            map_event(agent, Some("SessionStart"), &json!({})),
-            Some(AgentStatus::Idle)
-        );
-        assert_eq!(
-            map_event(agent, Some("SessionEnd"), &json!({})),
-            Some(AgentStatus::Idle)
-        );
-        assert_eq!(
-            map_event(
-                agent,
-                Some("UserPromptSubmit"),
-                &json!({ "prompt": "build features" })
-            ),
-            Some(AgentStatus::Thinking {
-                task_desc: "build features".into()
-            })
-        );
-        assert_eq!(
-            map_event(agent, Some("PreToolUse"), &json!({ "tool_name": "grep" })),
-            Some(AgentStatus::Thinking {
-                task_desc: "Using grep".into()
-            })
-        );
-        assert_eq!(
-            map_event(
-                agent,
-                Some("Stop"),
-                &json!({ "last_assistant_message": "All done!" })
-            ),
-            Some(AgentStatus::Completed {
-                summary: "All done!".into()
-            })
-        );
-    }
-
-    #[test]
-    fn test_codex_legacy_notify() {
-        assert_eq!(
-            map_event(
-                "codex",
-                None,
-                &json!({
-                    "type": "agent-turn-complete",
-                    "last-assistant-message": "Fixed build"
-                })
-            ),
-            Some(AgentStatus::Completed {
-                summary: "Fixed build".into()
-            })
-        );
     }
 
     #[test]
@@ -965,118 +658,11 @@ mod tests {
     }
 
     #[test]
-    fn test_opencode_events() {
-        assert_eq!(
-            map_event(
-                "opencode",
-                Some("session.status"),
-                &json!({ "sessionID": "s", "status": { "type": "busy" } })
-            ),
-            Some(AgentStatus::Thinking {
-                task_desc: "Working".into()
-            })
-        );
-        assert_eq!(
-            map_event(
-                "opencode",
-                Some("permission.asked"),
-                &json!({
-                    "action": "bash",
-                    "resources": ["cargo build", "cargo test"]
-                })
-            ),
-            Some(AgentStatus::WaitingForInput {
-                prompt: "Approve bash: cargo build, cargo test".into(),
-                options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()]
-            })
-        );
-        assert_eq!(
-            map_event(
-                "opencode",
-                Some("session.reasoning.delta"),
-                &json!({ "text": "Formulating architecture plan" })
-            ),
-            Some(AgentStatus::Thinking {
-                task_desc: "Formulating architecture plan".into()
-            })
-        );
-        assert_eq!(
-            map_event(
-                "opencode",
-                Some("session.tool.called"),
-                &json!({ "tool": "bash", "command": "cargo build" })
-            ),
-            Some(AgentStatus::Thinking {
-                task_desc: "bash: cargo build".into()
-            })
-        );
-        assert_eq!(
-            map_event("opencode", Some("session.tool.success"), &json!({})),
-            Some(AgentStatus::Thinking {
-                task_desc: "Thinking…".into()
-            })
-        );
-        assert_eq!(
-            map_event(
-                "opencode",
-                Some("form.created"),
-                &json!({ "title": "Select target platform", "options": ["macOS", "Linux"] })
-            ),
-            Some(AgentStatus::WaitingForInput {
-                prompt: "Select target platform".into(),
-                options: vec!["macOS".into(), "Linux".into()]
-            })
-        );
-        assert_eq!(
-            map_event("opencode", Some("session.idle"), &json!({})),
-            Some(AgentStatus::Completed { summary: "".into() })
-        );
-    }
-
-    #[test]
-    fn test_codex_extended() {
-        let agent = "codex";
-        assert_eq!(
-            map_event(
-                agent,
-                Some("PermissionRequest"),
-                &json!({
-                    "tool_name": "Bash",
-                    "tool_input": { "command": "rm -rf /tmp/foo" }
-                })
-            ),
-            Some(AgentStatus::WaitingForInput {
-                prompt: "Approve Bash: rm -rf /tmp/foo".into(),
-                options: vec!["Allow".into(), "Deny".into()]
-            })
-        );
-        assert_eq!(
-            map_event(
-                agent,
-                Some("PreToolUse"),
-                &json!({
-                    "tool_name": "FileEdit",
-                    "tool_input": { "file_path": "src/main.rs" }
-                })
-            ),
-            Some(AgentStatus::Thinking {
-                task_desc: "FileEdit: src/main.rs".into()
-            })
-        );
-        assert_eq!(
-            map_event(agent, Some("PostToolUse"), &json!({})),
-            Some(AgentStatus::Thinking {
-                task_desc: "Thinking…".into()
-            })
-        );
-    }
-
-    #[test]
     fn test_truncation() {
         let long_prompt = "x".repeat(350);
         let res = map_event(
-            "codex",
-            Some("UserPromptSubmit"),
+            "omp",
+            Some("before_agent_start"),
             &json!({ "prompt": long_prompt }),
         );
         match res {
@@ -1294,46 +880,6 @@ mod tests {
         let shutdown = map_signal("omp", Some("session_shutdown"), &json!({})).unwrap();
         assert_eq!(shutdown.status, AgentStatus::Idle);
         assert_eq!(shutdown.resolution, SignalResolution::ClearAll);
-    }
-
-    #[test]
-    fn test_legacy_agents_wrap_signal() {
-        let perm = map_signal(
-            "codex",
-            Some("PermissionRequest"),
-            &json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
-        )
-        .unwrap();
-        assert!(perm.attention.as_ref().unwrap().actionable);
-        assert_eq!(
-            perm.attention.as_ref().unwrap().kind,
-            AttentionKind::Approval
-        );
-
-        let stop = map_signal(
-            "codex",
-            Some("Stop"),
-            &json!({ "last_assistant_message": "Done" }),
-        )
-        .unwrap();
-        assert_eq!(stop.outcome, TurnOutcome::Done);
-
-        let oc_idle = map_signal("opencode", Some("session.idle"), &json!({})).unwrap();
-        assert_eq!(oc_idle.outcome, TurnOutcome::Done);
-
-        let perm_sig = map_signal(
-            "codex",
-            Some("PermissionRequest"),
-            &json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
-        )
-        .unwrap();
-        assert_eq!(perm_sig.resolution, SignalResolution::None);
-
-        let post_tool = map_signal("codex", Some("PostToolUse"), &json!({})).unwrap();
-        assert_eq!(post_tool.resolution, SignalResolution::ClearNonPlan);
-
-        let start_sig = map_signal("codex", Some("SessionStart"), &json!({})).unwrap();
-        assert_eq!(start_sig.resolution, SignalResolution::ClearAll);
     }
 
     #[test]

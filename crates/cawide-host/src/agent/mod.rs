@@ -3,7 +3,9 @@
 pub mod claude;
 pub mod detect;
 pub mod hook;
+pub mod launch;
 pub mod map;
+pub mod observe;
 pub mod respond;
 pub mod setup;
 pub mod tracker;

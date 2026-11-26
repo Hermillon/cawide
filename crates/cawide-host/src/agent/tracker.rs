@@ -118,6 +118,10 @@ impl AgentTracker {
             .tracked
             .as_ref()
             .and_then(|t| t.attention_queue.front().map(|a| a.id));
+        let old_head_key = self
+            .tracked
+            .as_ref()
+            .and_then(|t| t.attention_queue.front().and_then(|a| a.key.clone()));
         let old_turn_started_at = self.tracked.as_ref().and_then(|t| t.turn_started_at);
 
         let Some(t) = &mut self.tracked else {
@@ -182,6 +186,7 @@ impl AgentTracker {
         self.finish_transition(
             old_state,
             old_head_id,
+            old_head_key.as_deref(),
             old_turn_started_at,
             &TurnOutcome::None,
             now_secs,
@@ -210,6 +215,10 @@ impl AgentTracker {
             .tracked
             .as_ref()
             .and_then(|t| t.attention_queue.front().map(|a| a.id));
+        let old_head_key = self
+            .tracked
+            .as_ref()
+            .and_then(|t| t.attention_queue.front().and_then(|a| a.key.clone()));
         let old_turn_started_at = self.tracked.as_ref().and_then(|t| t.turn_started_at);
         let mut outcome_for_alert = TurnOutcome::None;
 
@@ -334,6 +343,7 @@ impl AgentTracker {
         self.finish_transition(
             old_state,
             old_head_id,
+            old_head_key.as_deref(),
             old_turn_started_at,
             &outcome_for_alert,
             now_secs,
@@ -386,6 +396,10 @@ impl AgentTracker {
             .tracked
             .as_ref()
             .and_then(|t| t.attention_queue.front().map(|a| a.id));
+        let old_head_key = self
+            .tracked
+            .as_ref()
+            .and_then(|t| t.attention_queue.front().and_then(|a| a.key.clone()));
         let old_turn_started_at = self.tracked.as_ref().and_then(|t| t.turn_started_at);
 
         if let Some(t) = &mut self.tracked {
@@ -592,6 +606,7 @@ impl AgentTracker {
         self.finish_transition(
             old_state,
             old_head_id,
+            old_head_key.as_deref(),
             old_turn_started_at,
             &signal.outcome,
             now_secs,
@@ -602,6 +617,7 @@ impl AgentTracker {
         &self,
         old_state: Option<AgentState>,
         old_head_id: Option<u64>,
+        old_head_key: Option<&str>,
         old_turn_started_at: Option<u64>,
         outcome: &TurnOutcome,
         now_secs: u64,
@@ -619,6 +635,7 @@ impl AgentTracker {
             old_state.as_ref(),
             new_state.as_ref(),
             old_head_id,
+            old_head_key,
             new_queue_head,
             outcome,
             old_turn_started_at,
@@ -1597,12 +1614,23 @@ mod tests {
     #[test]
     fn test_legacy_approval_cleared_by_post_tool_use() {
         let mut tracker = AgentTracker::default();
-        let perm = crate::agent::map::map_signal(
-            "codex",
-            Some("PermissionRequest"),
-            &serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } }),
-        )
-        .unwrap();
+        let perm = AgentSignal {
+            status: AgentStatus::WaitingForInput {
+                prompt: "Approve Bash: ls".into(),
+                options: vec!["Allow".into(), "Deny".into()],
+            },
+            attention: Some(AttentionSpec {
+                key: None,
+                kind: AttentionKind::Approval,
+                prompt: "Approve Bash: ls".into(),
+                options: vec!["Allow".into(), "Deny".into()],
+                actionable: true,
+            }),
+            outcome: TurnOutcome::None,
+            resolution: SignalResolution::None,
+            seq: None,
+            epoch: None,
+        };
         let r1 = tracker.on_hook_signal("codex", perm, 100, 100_000, 0);
         assert!(r1.changed);
         assert!(matches!(
@@ -1610,9 +1638,16 @@ mod tests {
             AgentStatus::WaitingForInput { .. }
         ));
 
-        let post =
-            crate::agent::map::map_signal("codex", Some("PostToolUse"), &serde_json::json!({}))
-                .unwrap();
+        let post = AgentSignal {
+            status: AgentStatus::Thinking {
+                task_desc: "Thinking…".into(),
+            },
+            attention: None,
+            outcome: TurnOutcome::None,
+            resolution: SignalResolution::ClearNonPlan,
+            seq: None,
+            epoch: None,
+        };
         let r2 = tracker.on_hook_signal("codex", post, 101, 101_000, 0);
         assert!(r2.changed);
         assert!(matches!(

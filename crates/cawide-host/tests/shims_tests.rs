@@ -2,8 +2,13 @@
 fn test_shims_generation() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_dir = tmp.path();
+    let bin_dir_pre = config_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir_pre).unwrap();
+    std::fs::write(bin_dir_pre.join("codex"), "#!/bin/sh\n").unwrap();
+    std::fs::write(bin_dir_pre.join("opencode"), "#!/bin/sh\n").unwrap();
     let bin_dir = cawide_host::net::shims::ensure_shims(config_dir).expect("ensure_shims");
-
+    assert!(!bin_dir.join("codex").exists());
+    assert!(!bin_dir.join("opencode").exists());
     assert_eq!(bin_dir, config_dir.join("bin"));
     assert!(bin_dir.is_dir());
 
@@ -40,11 +45,6 @@ fn test_shims_generation() {
     assert!(xdg_content.contains("is_port()"));
     assert!(xdg_content.contains(r#""$CAWIDE_BIN" open "$target_url""#));
 
-    let codex_shim = bin_dir.join("codex");
-    assert!(codex_shim.is_file());
-    let codex_content = std::fs::read_to_string(&codex_shim).expect("read codex");
-    assert!(codex_content.contains("--enable hooks --dangerously-bypass-hook-trust"));
-
     let claude_shim = bin_dir.join("claude");
     assert!(claude_shim.is_file());
     let claude_content = std::fs::read_to_string(&claude_shim).expect("read claude");
@@ -56,11 +56,6 @@ fn test_shims_generation() {
     let omp_content = std::fs::read_to_string(&omp_shim).expect("read omp");
     assert!(omp_content.contains("setup omp"));
 
-    let opencode_shim = bin_dir.join("opencode");
-    assert!(opencode_shim.is_file());
-    let opencode_content = std::fs::read_to_string(&opencode_shim).expect("read opencode");
-    assert!(opencode_content.contains("setup opencode"));
-
     let zsh_dir = config_dir.join("shell").join("zsh");
     assert!(zsh_dir.join(".zshenv").is_file());
     assert!(zsh_dir.join(".zprofile").is_file());
@@ -69,15 +64,7 @@ fn test_shims_generation() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for shim in [
-            &cawide_open,
-            &open_shim,
-            &xdg_open,
-            &codex_shim,
-            &claude_shim,
-            &omp_shim,
-            &opencode_shim,
-        ] {
+        for shim in [&cawide_open, &open_shim, &xdg_open, &claude_shim, &omp_shim] {
             let mode = std::fs::metadata(shim)
                 .expect("metadata")
                 .permissions()
@@ -100,10 +87,8 @@ fn test_shims_generation() {
     assert!(bin_dir.join("cawide-open").exists());
     assert!(bin_dir.join("open").exists());
     assert!(bin_dir.join("xdg-open").exists());
-    assert!(bin_dir.join("codex").exists());
     assert!(bin_dir.join("claude").exists());
     assert!(bin_dir.join("omp").exists());
-    assert!(bin_dir.join("opencode").exists());
 }
 
 #[test]

@@ -856,12 +856,12 @@ fn test_10_symlinked_ancestor() {
     let target_home = tmp.path();
     let cfg = target_home.join(".config/cawide");
     let exe = fixture_exe(tmp.path());
-
-    // Symlink .claude and .codex to outside_dir
+    // Symlink .claude and .omp/agent to outside_dir
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(outside_dir.path(), target_home.join(".claude")).unwrap();
-        std::os::unix::fs::symlink(outside_dir.path(), target_home.join(".codex")).unwrap();
+        std::fs::create_dir_all(target_home.join(".omp")).unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), target_home.join(".omp/agent")).unwrap();
     }
     let tmp_src = tempfile::tempdir().unwrap();
     let env = fixture_home(tmp_src.path());
@@ -881,7 +881,11 @@ fn test_10_symlinked_ancestor() {
     assert!(report
         .notices
         .iter()
-        .any(|n| n.contains("skipped Cawide hooks for codex")));
+        .any(|n| n.contains("skipped Cawide hooks for omp")));
+    assert!(!target_home.join(".codex/hooks.json").exists());
+    assert!(!target_home
+        .join(".config/opencode/plugins/cawide.js")
+        .exists());
 }
 
 #[test]
