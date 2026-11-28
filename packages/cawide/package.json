@@ -1,7 +1,7 @@
 {
   "name": "cawide",
   "version": "0.16.1",
-  "description": "Run your terminal and AI coding agents on your computer, drive them from your iPhone.",
+  "description": "Cawide is a native iPhone app and CLI that runs AI coding agents like Claude Code and Codex on your computer and lets you control them from your phone, with a real terminal, Git review, files, and localhost preview.",
   "homepage": "https://cawide.dev",
   "license": "Apache-2.0",
   "author": "Đỗ Đăng Long",

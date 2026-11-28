@@ -5,7 +5,7 @@
 <h1 align="center">Cawide</h1>
 
 <p align="center">
-  <strong>Your coding agent is waiting. Approve it from your iPhone.</strong>
+  <strong>Cawide is a native iPhone app and CLI that runs AI coding agents like Claude Code and Codex on your computer and lets you control them from your phone, with a real terminal, Git review, files, and localhost preview.</strong>
 </p>
 
 <p align="center">
